@@ -1,0 +1,52 @@
+{
+  "error": {
+    "invalid_session": "Sessió no vàlida o caducada",
+    "invalid_user_id": "ID d'usuari no vàlid",
+    "location_required": "Es requereix ubicació per a aquesta consulta",
+    "language_not_supported": "Idioma '{language}' no suportat. Idiomes disponibles: {supported}",
+    "invalid_coordinates": "Coordenades invàlides. La latitud ha d'estar entre -90 i 90, longitud entre -180 i 180",
+    "service_unavailable": "Servei temporalment no disponible. Si us plau, prova més tard",
+    "places_api_error": "Error en cercar llocs: {error}",
+    "database_error": "Error de base de dades: {error}",
+    "cache_error": "Error de memòria cau: {error}",
+    "unknown_error": "Error inesperat: {error}"
+  },
+  "success": {
+    "query_processed": "Consulta processada correctament",
+    "plan_created": "Pla creat correctament amb {locations} ubicacions",
+    "preferences_updated": "Preferències actualitzades correctament"
+  },
+  "validation": {
+    "user_id": "L'ID d'usuari ha de ser un UUID vàlid",
+    "session_id": "L'ID de sessió ha de ser un UUID vàlid",
+    "query": "La consulta no pot estar buida",
+    "language": "L'idioma ha de ser un de: {supported}",
+    "latitude": "La latitud ha d'estar entre -90 i 90",
+    "longitude": "La longitud ha d'estar entre -180 i 180"
+  },
+  "agent": {
+    "greeting": "Hola! Sóc el teu assistent de descobriment de llocs. Com puc ajudar-te?",
+    "no_results": "No he trobat llocs que coincideixin amb la teva cerca. Prova amb una altra consulta",
+    "processing": "Processant la teva consulta...",
+    "thinking": "Deixa'm pensar...",
+    "searching": "Cercant llocs..."
+  },
+  "plan": {
+    "title_prefix": "Pla de",
+    "duration": "Durada total: {hours} hores {minutes} minuts",
+    "locations": "Ubicacions: {count}",
+    "distance": "Distància total: {km} km",
+    "start_time": "Hora d'inici suggerida: {time}",
+    "end_time": "Hora de fi estimada: {time}"
+  },
+  "ui": {
+    "loading": "Carregant...",
+    "retry": "Reintentar",
+    "cancel": "Cancel·lar",
+    "confirm": "Confirmar",
+    "back": "Tornar",
+    "next": "Següent",
+    "finish": "Finalitzar"
+  }
+}
+

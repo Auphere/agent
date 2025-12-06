@@ -1,0 +1,52 @@
+{
+  "error": {
+    "invalid_session": "Invalid or expired session",
+    "invalid_user_id": "Invalid user ID",
+    "location_required": "Location is required for this query",
+    "language_not_supported": "Language '{language}' not supported. Available languages: {supported}",
+    "invalid_coordinates": "Invalid coordinates. Latitude must be between -90 and 90, longitude between -180 and 180",
+    "service_unavailable": "Service temporarily unavailable. Please try again later",
+    "places_api_error": "Error searching for places: {error}",
+    "database_error": "Database error: {error}",
+    "cache_error": "Cache error: {error}",
+    "unknown_error": "Unexpected error: {error}"
+  },
+  "success": {
+    "query_processed": "Query processed successfully",
+    "plan_created": "Plan created successfully with {locations} locations",
+    "preferences_updated": "Preferences updated successfully"
+  },
+  "validation": {
+    "user_id": "User ID must be a valid UUID",
+    "session_id": "Session ID must be a valid UUID",
+    "query": "Query cannot be empty",
+    "language": "Language must be one of: {supported}",
+    "latitude": "Latitude must be between -90 and 90",
+    "longitude": "Longitude must be between -180 and 180"
+  },
+  "agent": {
+    "greeting": "Hello! I'm your place discovery assistant. How can I help you?",
+    "no_results": "I couldn't find places matching your search. Try another query",
+    "processing": "Processing your query...",
+    "thinking": "Let me think...",
+    "searching": "Searching for places..."
+  },
+  "plan": {
+    "title_prefix": "Plan for",
+    "duration": "Total duration: {hours} hours {minutes} minutes",
+    "locations": "Locations: {count}",
+    "distance": "Total distance: {km} km",
+    "start_time": "Suggested start time: {time}",
+    "end_time": "Estimated end time: {time}"
+  },
+  "ui": {
+    "loading": "Loading...",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "back": "Back",
+    "next": "Next",
+    "finish": "Finish"
+  }
+}
+

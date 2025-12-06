@@ -1,0 +1,48 @@
+# Core
+python-dotenv==1.0.1
+pydantic==2.10.6
+pydantic-settings==2.7.1
+
+# LangChain
+langchain==0.3.15
+langchain-core==0.3.31
+langchain-community==0.3.15
+langgraph==0.2.61
+langchain-openai==0.3.1
+langchain-anthropic==0.3.4
+
+# API
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+requests==2.32.3
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+greenlet==3.1.1
+
+# Cache
+redis==5.2.1
+
+# Testing & Debug
+streamlit==1.41.1
+streamlit-chat==0.1.1
+plotly==5.24.1
+pandas==2.2.3
+
+# Logging
+python-json-logger==3.2.1
+structlog==24.4.0
+
+# Utils
+tenacity==9.0.0
+uuid==1.30
+
+# Development
+pytest==8.3.4
+pytest-asyncio==0.25.2
+black==24.10.0
+ruff==0.9.2
+

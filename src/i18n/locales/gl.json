@@ -1,0 +1,52 @@
+{
+  "error": {
+    "invalid_session": "Sesión non válida ou caducada",
+    "invalid_user_id": "ID de usuario non válido",
+    "location_required": "Requírese ubicación para esta consulta",
+    "language_not_supported": "Idioma '{language}' non soportado. Idiomas dispoñibles: {supported}",
+    "invalid_coordinates": "Coordenadas inválidas. A latitude debe estar entre -90 e 90, lonxitude entre -180 e 180",
+    "service_unavailable": "Servizo temporalmente non dispoñible. Por favor intenta máis tarde",
+    "places_api_error": "Erro ao buscar lugares: {error}",
+    "database_error": "Erro de base de datos: {error}",
+    "cache_error": "Erro de caché: {error}",
+    "unknown_error": "Erro inesperado: {error}"
+  },
+  "success": {
+    "query_processed": "Consulta procesada exitosamente",
+    "plan_created": "Plan creado exitosamente con {locations} ubicacións",
+    "preferences_updated": "Preferencias actualizadas correctamente"
+  },
+  "validation": {
+    "user_id": "O ID de usuario debe ser un UUID válido",
+    "session_id": "O ID de sesión debe ser un UUID válido",
+    "query": "A consulta non pode estar baleira",
+    "language": "O idioma debe ser un de: {supported}",
+    "latitude": "A latitude debe estar entre -90 e 90",
+    "longitude": "A lonxitude debe estar entre -180 e 180"
+  },
+  "agent": {
+    "greeting": "Ola! Son o teu asistente de descubrimento de lugares. En que podo axudarche?",
+    "no_results": "Non atopei lugares que coincidan coa túa busca. Intenta con outra consulta",
+    "processing": "Procesando a túa consulta...",
+    "thinking": "Déixame pensar...",
+    "searching": "Buscando lugares..."
+  },
+  "plan": {
+    "title_prefix": "Plan de",
+    "duration": "Duración total: {hours} horas {minutes} minutos",
+    "locations": "Ubicacións: {count}",
+    "distance": "Distancia total: {km} km",
+    "start_time": "Hora de inicio suxerida: {time}",
+    "end_time": "Hora de fin estimada: {time}"
+  },
+  "ui": {
+    "loading": "Cargando...",
+    "retry": "Reintentar",
+    "cancel": "Cancelar",
+    "confirm": "Confirmar",
+    "back": "Volver",
+    "next": "Seguinte",
+    "finish": "Finalizar"
+  }
+}
+
