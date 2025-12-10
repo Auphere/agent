@@ -17,6 +17,7 @@ from api.models import (
 from src.database import ChatRepository, ConversationRepository
 from src.utils.logger import get_logger
 from src.utils.title_generator import generate_chat_title
+from src.utils.normalizers import normalize_plan
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 logger = get_logger("chat_routes")
@@ -154,12 +155,16 @@ async def get_chat_history(
                     content=turn.user_query,
                 )
             )
+            # Normalize plan if present
+            raw_plan = turn.extra_metadata.get("plan") if turn.extra_metadata else None
+            normalized_plan = normalize_plan(raw_plan) if raw_plan else None
+            
             messages.append(
                 ChatHistoryMessage(
                     role="assistant",
                     content=turn.agent_response,
                     places=turn.places_found or [],
-                    plan=turn.extra_metadata.get("plan") if turn.extra_metadata else None,
+                    plan=normalized_plan,
                 )
             )
 

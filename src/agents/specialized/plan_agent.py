@@ -123,6 +123,67 @@ class PlanAgent:
             # Extract places from tool results
             places = extract_places_from_messages(result["messages"])
             
+            # Extract plan JSON from tool results
+            plan = None
+            for msg in result["messages"]:
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        # Check if this is a generate_plan_json_tool call
+                        tool_name = getattr(tool_call, 'name', str(tool_call))
+                        if 'generate_plan_json_tool' in tool_name:
+                            # Get the tool_call ID to match with response
+                            tool_call_id = getattr(tool_call, 'id', None)
+                            
+                            # Find the matching tool response by ID
+                            tool_responses = [m for m in result["messages"] 
+                                            if hasattr(m, 'type') and m.type == 'tool']
+                            
+                            for tool_response in tool_responses:
+                                # Match response to this specific tool call
+                                response_tool_id = getattr(tool_response, 'tool_call_id', None)
+                                
+                                # Only process if IDs match (or if no ID tracking available, use content check)
+                                if tool_call_id and response_tool_id and tool_call_id != response_tool_id:
+                                    continue
+                                
+                                if hasattr(tool_response, 'content'):
+                                    try:
+                                        import json
+                                        content = tool_response.content
+                                        
+                                        # Skip empty content
+                                        if not content:
+                                            continue
+                                        
+                                        # Parse content if it's a string
+                                        if isinstance(content, str):
+                                            # Skip if it's empty or whitespace
+                                            if not content.strip():
+                                                continue
+                                            
+                                            # Skip if it doesn't look like JSON (starts with "Error:" or other text)
+                                            stripped = content.strip()
+                                            if not (stripped.startswith('{') or stripped.startswith('[')):
+                                                continue
+                                            
+                                            response_data = json.loads(content)
+                                        else:
+                                            response_data = content
+                                        
+                                        # Extract plan if present and valid
+                                        if isinstance(response_data, dict) and response_data.get('success') and response_data.get('plan'):
+                                            plan = response_data['plan']
+                                            self.logger.info("plan-json-extracted", plan_id=plan.get('planId'))
+                                            break
+                                    except json.JSONDecodeError as e:
+                                        # Only log if it looked like it should be JSON
+                                        if content and content.strip().startswith('{'):
+                                            self.logger.debug("failed-to-parse-plan-json", error=str(e), content_preview=str(content)[:100])
+                                    except Exception as e:
+                                        self.logger.error("failed-to-extract-plan", error=str(e), content_type=type(content).__name__)
+                if plan:
+                    break
+            
             # Save places to DB (upsert)
             if places:
                 try:
@@ -146,6 +207,7 @@ class PlanAgent:
             return {
                 "response_text": response_text,
                 "places": places,
+                "plan": plan,  # Include structured plan JSON
                 "tool_calls": tool_calls,
                 "reasoning_steps": reasoning_steps,
                 "agent_type": "plan",

@@ -42,6 +42,7 @@ class QueryResponse(BaseModel):
     language: str
     context: ValidatedContext
     places: List[Dict[str, Any]] = Field(default_factory=list)  # Accept dicts directly - already normalized
+    plan: Optional[Dict[str, Any]] = None  # Structured plan from PlanAgent
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

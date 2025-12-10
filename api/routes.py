@@ -37,6 +37,7 @@ from src.routers.llm_router import LLMRouter
 from src.utils.logger import get_logger
 from src.utils.metrics import MetricsCollector, QueryMetrics
 from src.utils.title_generator import generate_chat_title
+from src.utils.normalizers import normalize_plan
 from src.validators.context_validator import ContextValidator
 from src.validators.schemas import ContextValidationError
 
@@ -110,8 +111,17 @@ async def query_agent(
         )
 
         # Step 3: Intent Classification (with caching)
-        # Check if chat_mode is "plan" - if so, force PLAN intent
+        # Check if chat_mode is "plan" OR if the existing chat is in plan mode
         chat_mode = validated_context.metadata.get("chat_mode", "explore")
+        
+        # If chat exists and is in plan mode, force PLAN intent for continuity
+        if chat and chat.mode == "plan":
+            chat_mode = "plan"
+            logger.info(
+                "forcing_plan_mode_from_existing_chat",
+                chat_id=str(chat.id),
+                session_id=str(session_uuid)
+            )
         
         if chat_mode == "plan":
             # Force PLAN intent when user explicitly chooses plan mode
@@ -120,7 +130,7 @@ async def query_agent(
                 intention=IntentType.PLAN,
                 confidence=1.0,
                 complexity="high",
-                reasoning="User selected Plan mode from UI"
+                reasoning="User selected Plan mode from UI or continuing plan conversation"
             )
         else:
             intent_result = await classifier.classify(request.query, validated_context)
@@ -188,6 +198,20 @@ async def query_agent(
 
         # Step 6: Save to Database (conversation turn)
         try:
+            # Build extra_metadata with plan if generated
+            extra_metadata = {
+                "query_id": query_id,
+                "reasoning": intent_result.reasoning,
+                "cost_usd": query_metrics.estimated_cost_usd,
+            }
+            
+            # Include plan in metadata if it was generated (normalize it first)
+            raw_plan = agent_result.get("plan")
+            normalized_plan = None
+            if raw_plan:
+                normalized_plan = normalize_plan(raw_plan)
+                extra_metadata["plan"] = normalized_plan
+            
             await conversation_repo.save_turn(
                 user_id=user_uuid,
                 session_id=session_uuid,
@@ -203,11 +227,7 @@ async def query_agent(
                 processing_time_ms=elapsed,
                 tool_calls=query_metrics.tool_calls,
                 reasoning_steps=query_metrics.reasoning_steps,
-                extra_metadata={
-                    "query_id": query_id,
-                    "reasoning": intent_result.reasoning,
-                    "cost_usd": query_metrics.estimated_cost_usd,
-                },
+                extra_metadata=extra_metadata,
             )
             logger.info("conversation_turn_saved", query_id=query_id)
             
@@ -306,7 +326,11 @@ async def query_agent(
             ),
         }
 
-        # Return final response
+        # Normalize plan if present
+        raw_plan_response = agent_result.get("plan")
+        normalized_plan_response = normalize_plan(raw_plan_response) if raw_plan_response else None
+        
+        # Return final response with plan if generated
         return QueryResponse(
             response_text=agent_result.get("response_text", ""),
             intention=intent_result.intention.value,
@@ -317,6 +341,7 @@ async def query_agent(
             context=validated_context,
             metadata=metadata,
             places=agent_result.get("places", []),
+            plan=normalized_plan_response,  # Include normalized plan if generated
         )
 
     except HTTPException:

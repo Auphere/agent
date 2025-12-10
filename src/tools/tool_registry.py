@@ -194,12 +194,15 @@ def get_plan_tools() -> List[BaseTool]:
     
     Optimized for multi-location planning.
     """
+    from src.tools.generate_plan_json_tool import generate_plan_json_tool
+    
     return [
         google_places_tool,          # Find places
         weather_api_tool,            # Weather context
         calculate_route_tool,        # Route optimization
         rank_by_score_tool,         # Rank options
         generate_itinerary_tool,    # Create itinerary
+        generate_plan_json_tool,    # Generate structured JSON for frontend
         update_plan_context_tool,   # Save plan details
         search_local_db_fallback_tool, # Fallback
     ]
