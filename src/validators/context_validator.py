@@ -26,12 +26,14 @@ class ContextValidator:
         self.logger = get_logger("context-validator", settings=self.settings)
 
     async def validate_user(self, user_id: str) -> str:
-        try:
-            UUID(user_id)
-        except ValueError as exc:
-            self.logger.warning("invalid-user-id-format", user_id=user_id)
-            raise ContextValidationError("user_id must be a valid UUID", field="user_id") from exc
-        return user_id
+        """Validate user_id. Now accepts any string format to support Auth0 IDs."""
+        if not user_id or not isinstance(user_id, str) or len(user_id.strip()) == 0:
+            self.logger.warning("invalid-user-id-empty", user_id=user_id)
+            raise ContextValidationError("user_id cannot be empty", field="user_id")
+        
+        # Auth0 IDs can be: "auth0|123456", "google-oauth2|123456", etc.
+        # UUIDs are also valid as strings
+        return user_id.strip()
 
     async def validate_session(self, session_id: Optional[str]) -> str:
         if not session_id:

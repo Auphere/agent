@@ -42,13 +42,15 @@ class IntentClassifier:
         # Using Pydantic output parser via with_structured_output
         return prompt | self.llm.with_structured_output(IntentResult)
 
-    async def classify(self, query: str, context: ValidatedContext) -> IntentResult:
+    async def classify(self, query: str, context: ValidatedContext, chat_mode: str = "explore") -> IntentResult:
         """
         Classify the user query based on text and context.
         
         Args:
             query: The user's input text.
             context: Validated context from Step 1.
+            chat_mode: Current chat mode ("explore" or "plan"). In explore mode, 
+                      PLAN intent is restricted unless explicitly mentioned.
             
         Returns:
             IntentResult object with classification details.
@@ -65,8 +67,20 @@ class IntentClassifier:
                     "query": query,
                     "language": context.language,
                     "location": location_str,
+                    "chat_mode": chat_mode,
                 }
             )
+            
+            # In explore mode, override PLAN to RECOMMEND unless user explicitly mentions planning
+            if chat_mode == "explore" and result.intention.value == "PLAN":
+                plan_keywords = ["plan", "planificar", "itinerario", "crear plan", "itinerary"]
+                has_plan_keyword = any(keyword in query.lower() for keyword in plan_keywords)
+                
+                if not has_plan_keyword:
+                    self.logger.info("plan-intent-overridden-to-recommend", 
+                                   reason="explore mode without explicit plan keyword")
+                    result.intention = IntentType.RECOMMEND
+                    result.reasoning = "Usuario en modo Explore, buscando recomendaciones"
             
             self.logger.info(
                 "intent-classified",

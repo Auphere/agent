@@ -42,9 +42,8 @@ async def get_user_chats(
         List of chats ordered by most recently updated
     """
     try:
-        user_uuid = UUID(user_id)
         chats = await chat_repo.get_user_chats(
-            user_id=user_uuid,
+            user_id=user_id,  # Now accepts string (Auth0 IDs)
             limit=limit,
             offset=offset,
         )
@@ -208,7 +207,7 @@ async def create_chat(
     If session_id is not provided, a new UUID will be generated.
     """
     try:
-        user_uuid = UUID(request.user_id)
+        user_id = request.user_id  # Now accepts string (Auth0 IDs)
         session_uuid = UUID(request.session_id) if request.session_id else uuid4()
         
         # Check if chat with this session_id already exists
@@ -217,7 +216,7 @@ async def create_chat(
             # Return existing chat instead of creating duplicate
             return ChatResponse(
                 id=str(existing_chat.id),
-                user_id=str(existing_chat.user_id),
+                user_id=existing_chat.user_id,
                 session_id=str(existing_chat.session_id),
                 title=existing_chat.title,
                 mode=existing_chat.mode,
@@ -233,7 +232,7 @@ async def create_chat(
             title = "Nueva conversación"
         
         chat = await chat_repo.create_chat(
-            user_id=user_uuid,
+            user_id=user_id,
             session_id=session_uuid,
             title=title,
             mode=request.mode,
@@ -338,9 +337,9 @@ async def delete_chat(
     """
     try:
         chat_uuid = UUID(chat_id)
-        user_uuid = UUID(user_id)
+        # user_id now accepts string (Auth0 IDs)
         
-        deleted = await chat_repo.delete_chat(chat_uuid, user_uuid)
+        deleted = await chat_repo.delete_chat(chat_uuid, user_id)
         
         if not deleted:
             raise HTTPException(

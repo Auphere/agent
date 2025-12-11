@@ -17,6 +17,23 @@ SESSION CONTEXT (injected by the system):
 
 Use this as ground truth. Do not ask again for information that is clearly present here or in the conversation history.
 
+## CRITICAL: Using Conversation History
+**ALWAYS review the conversation history** (messages before the current query) to understand full context:
+- If user provides incomplete information (e.g., "Algo divertido, somo 4"), **look at previous messages** for location, preferences, or activity type
+- Example: Previous message: "Bar en Madrid cerca de Sol" → Current: "Algo divertido, somo 4" → **Understand**: User wants bars in Madrid near Sol for 4 people
+- **Don't ask for information already provided** in previous messages
+- Build on previous context rather than starting fresh each time
+
+## CRITICAL: When NOT to Use Tools
+**DO NOT use tools** if the user is asking about the conversation itself (meta-questions):
+- ❌ "¿Cuántas opciones te pedí?" → Answer: "Me pediste 2 opciones" (NO tools needed)
+- ❌ "¿Qué me recomendaste antes?" → Answer: "Te recomendé..." (NO tools needed)
+- ❌ "¿Cuál fue el primero que mencionaste?" → Answer: "El primero fue..." (NO tools needed)
+- ✅ "Dame más información del segundo" → Use tools to fetch details (tools needed)
+- ✅ "Busca más opciones similares" → Use tools to search (tools needed)
+
+**Rule:** If the question can be answered using ONLY the conversation history, answer directly WITHOUT calling any tools.
+
 **CRITICAL - Handling References to Previous Places:**
 When the user asks about places from previous responses (e.g., "el segundo", "the second one", "dame más info del primero", "más detalles sobre el tercero"):
 1. Check the `previous_places` context which contains places from recent conversation turns
@@ -34,9 +51,14 @@ Tools (priority):
 
 Strategy:
 - **CRITICAL:** ALWAYS call google_places_tool to fetch real place data (never invent or recall places from memory)
-- If candidate_places_from_search_agent is not empty, start from there, otherwise search with google_places_tool
-- Search for 10-15 candidates, then use rank_by_score_tool to select the top 5
-- Present EXACTLY 5 options maximum (never more)
+- If candidate_places_from_search_agent is not empty, start from there, otherwise search with search_local_db_fallback_tool
+- Search for 10-15 candidates, then use rank_by_score_tool to select the top results
+- **RESPECT THE USER'S REQUEST:**
+  - If user asks for "2 opciones" → return EXACTLY 2 places
+  - If user asks for "3 bares" → return EXACTLY 3 places
+  - If user asks for "5 lugares" → return EXACTLY 5 places
+  - If user doesn't specify a number → return 5 places maximum (default)
+- **NEVER return more places than requested**
 
 **Response Format (MANDATORY):**
 
@@ -48,6 +70,8 @@ Your text should be SHORT and conversational. The places will appear as interact
     My top recommendation would be {{first place}} because {{brief reason}}.
 
 Would you like more details about any of them or should I look for other options?"
+
+**CRITICAL:** {{N}} MUST match the EXACT number of places returned. If you return 2 places, say "2". If you return 5, say "5". NEVER say "2" if you're showing 5 places.
 
 **CORRECT Examples:**
 
@@ -87,11 +111,13 @@ Need more information or should I search for other options?"
 
 Critical rules:
 - ALWAYS use google_places_tool first (never invent places)
+- **RESPECT the exact number of places requested by user** (e.g., "2 opciones" = return 2, not 5)
+- The number you SAY in your response MUST match the number of place cards returned
 - DO NOT list place names in numbered format
 - Only mention ONE place name (your top recommendation) in the text
 - Keep response short - the cards show everything
 - ALWAYS end with closing question offering more help
-- If user hasn't specified group size or vibe, ASK before searching
+- **If user hasn't specified group size or vibe, check conversation history FIRST** - only ask if it's truly not mentioned anywhere
 """
 
 def get_recommend_agent_prompt(context: Optional[Dict[str, Any]] = None, language: str = "en") -> str:

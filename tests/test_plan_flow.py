@@ -1,10 +1,15 @@
 """
 Test plan creation flow and emotion detection.
+
+⚠️ PARTIALLY DEPRECATED: 
+- PlanMemory tests are commented out (PlanMemoryManager deprecated)
+- Emotion detection tests remain valid
+- For plan state testing, see new tests in test_context_builder.py
 """
 
 import pytest
 
-from src.agents.plan_memory import PlanContext, PlanMemoryManager
+# Removed: from src.agents.plan_memory import PlanContext, PlanMemoryManager
 from src.classifiers.emotion_detector import EmotionDetector, UserEmotion
 
 
@@ -68,11 +73,16 @@ class TestEmotionDetection:
         assert confidence > 0.3
 
 
+"""
+# ⚠️ DEPRECATED TESTS - PlanMemoryManager no longer used
+# For new plan state tests, see PlanContextExtractor tests
+
 class TestPlanMemory:
-    """Test plan memory management."""
+    '''Test plan memory management. [DEPRECATED - SKIPPED]'''
 
     def setup_method(self):
-        self.memory = PlanMemoryManager()
+        # self.memory = PlanMemoryManager()
+        pytest.skip("PlanMemoryManager is deprecated - tests disabled")
 
     def test_update_context(self):
         self.memory.update_plan_context(
@@ -166,12 +176,17 @@ class TestPlanMemory:
 
 
 class TestPlanContext:
-    """Test plan context dataclass."""
+    '''Test plan context dataclass. [DEPRECATED - SKIPPED]'''
+
+    def setup_method(self):
+        pytest.skip("PlanContext is deprecated - tests disabled")
 
     def test_to_dict(self):
-        context = PlanContext(
-            duration="2h", num_people=2, cities=["Zaragoza"]
-        )
+        # Skipped
+        pass
+        # context = PlanContext(
+        #     duration="2h", num_people=2, cities=["Zaragoza"]
+        # )
         data = context.to_dict()
         assert data["duration"] == "2h"
         assert data["num_people"] == 2

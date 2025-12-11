@@ -73,15 +73,38 @@ async def save_places_to_db(
                 if place.get("vibe"):
                     main_categories.extend(place["vibe"][:2])
                 
+                # Extract city and district from address or neighborhood
+                address = place.get("address", "")
+                neighborhood = place.get("neighborhood")
+                
+                # Extract city from address (usually last part before country)
+                city = "Madrid"  # Default fallback
+                if address:
+                    parts = [p.strip() for p in address.split(",")]
+                    # Usually format: "Street, Number, District, PostalCode City, Country"
+                    # City is usually second-to-last (index -2)
+                    if len(parts) >= 2:
+                        # Try to extract city from address
+                        city_part = parts[-2] if len(parts) > 2 else parts[-1]
+                        # Remove postal code if present (e.g., "28009 Madrid" -> "Madrid")
+                        city = city_part.split()[-1] if city_part.split() else "Madrid"
+                
+                # Use neighborhood if available, otherwise extract from address
+                district = neighborhood
+                if not district and address:
+                    parts = [p.strip() for p in address.split(",")]
+                    if len(parts) >= 3:
+                        district = parts[2]  # District is usually 3rd part
+                
                 # Build request
                 request_body = {
                     "name": place.get("name", ""),
                     "description": place.get("description"),
                     "type": place_type,
                     "location": [lon, lat],  # [longitude, latitude]
-                    "address": place.get("address"),
-                    "city": place.get("neighborhood", "Zaragoza").split(",")[0] if place.get("neighborhood") else "Zaragoza",
-                    "district": place.get("neighborhood"),
+                    "address": address,
+                    "city": city,
+                    "district": district,
                     "phone": place.get("phone"),
                     "website": place.get("website"),
                     "google_place_id": str(google_place_id),

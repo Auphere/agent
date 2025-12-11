@@ -24,7 +24,7 @@ from src.tools.plan_tool import PlanTool
 
 # NEW: Search tools (external APIs)
 from src.tools.search import (
-    google_places_tool,
+    google_places_tool,  # 🎯 BETA PRIMARY: Direct Google Places API
     web_search_tool,
     weather_api_tool,
 )
@@ -104,7 +104,7 @@ def get_available_tools() -> List[BaseTool]:
     🎯 BETA VERSION - Tool Priority Order:
     
     SEARCH TOOLS (Real-time data):
-    1. google_places_tool - PRIMARY search for places (Google Places API)
+    1. google_places_tool - PRIMARY search for places (Google Places API direct)
     2. web_search_tool - Web search for reviews, events, context
     3. weather_api_tool - Weather for indoor/outdoor recommendations
     
@@ -122,12 +122,12 @@ def get_available_tools() -> List[BaseTool]:
     10. update_plan_context_tool - Save plan details to memory
     
     LEGACY TOOLS (Being phased out):
-    11. search_places_tool - Old place search (use google_places_tool instead)
+    11. search_places_tool - Old search (use google_places_tool instead)
     12. create_itinerary_tool_legacy - Old itinerary (use generate_itinerary_tool)
     """
     return [
         # PRIMARY SEARCH TOOLS (External APIs - Real-time)
-        google_places_tool,           # 🎯 PRIMARY place search
+        google_places_tool,           # 🎯 PRIMARY place search (Google Places API direct)
         web_search_tool,              # Web search for context
         weather_api_tool,             # Weather context
         
@@ -145,7 +145,7 @@ def get_available_tools() -> List[BaseTool]:
         update_plan_context_tool,    # Plan memory
         
         # LEGACY TOOLS (for backward compatibility)
-        search_places_tool,          # Legacy search
+        search_places_tool,          # Legacy search (via auphere-places Rust)
         create_itinerary_tool_legacy,  # Legacy itinerary
     ]
 
@@ -182,7 +182,7 @@ def get_search_tools() -> List[BaseTool]:
     Optimized for fast place lookups.
     """
     return [
-        google_places_tool,           # PRIMARY search
+        google_places_tool,           # PRIMARY search (Google Places API direct)
         web_search_tool,              # Additional context
         search_local_db_fallback_tool, # Fallback
     ]
@@ -197,7 +197,7 @@ def get_plan_tools() -> List[BaseTool]:
     from src.tools.generate_plan_json_tool import generate_plan_json_tool
     
     return [
-        google_places_tool,          # Find places
+        google_places_tool,          # Find places (Google Places API direct)
         weather_api_tool,            # Weather context
         calculate_route_tool,        # Route optimization
         rank_by_score_tool,         # Rank options
@@ -215,7 +215,7 @@ def get_recommend_tools() -> List[BaseTool]:
     Optimized for ranking and scoring.
     """
     return [
-        google_places_tool,          # Find candidates
+        google_places_tool,          # Find candidates (Google Places API direct)
         weather_api_tool,            # Weather context
         rank_by_score_tool,         # PRIMARY for recommendations
         web_search_tool,            # Reviews and context

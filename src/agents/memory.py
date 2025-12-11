@@ -1,6 +1,13 @@
 """
 Context memory management for maintaining conversation continuity.
 Handles short-term (session) and long-term (user history) memory.
+
+⚠️ DEPRECATED: This module is being replaced by conversation_buffer.py and context_builder.py
+for a more robust, production-grade memory system.
+
+For new code, use:
+- ConversationBuffer: For loading/managing conversation context
+- ContextBuilder: For building prompts from context
 """
 
 from datetime import datetime
@@ -457,6 +464,8 @@ class ConversationMemory:
 class MemoryManager:
     """
     High-level memory manager that combines short-term and long-term memory.
+    
+    ✅ UPDATED: Now uses ConversationBuffer and ContextBuilder for robust memory management.
     """
 
     def __init__(
@@ -471,10 +480,22 @@ class MemoryManager:
             repository: Database repository
             cache: Optional cache manager
         """
+        # Old implementation (kept for backward compatibility during migration)
         self.conversation_memory = ConversationMemory(
             repository=repository,
             cache=cache,
         )
+        
+        # New implementation (production-grade)
+        from src.agents.conversation_buffer import ConversationBuffer
+        from src.agents.context_builder import ContextBuilder
+        
+        self.buffer = ConversationBuffer(
+            repository=repository,
+            cache=cache,
+        )
+        self.builder = ContextBuilder()
+        
         self.logger = get_logger("memory_manager")
 
     async def build_agent_context(
@@ -484,11 +505,12 @@ class MemoryManager:
         current_query: str,
         include_history: bool = True,
         include_patterns: bool = False,
+        current_language: str = "es",
     ) -> dict:
         """
         Build comprehensive context for agent.
         
-        Optimized to fetch history once and build all views from it.
+        ✅ UPDATED: Now uses ConversationBuffer for robust, production-grade memory.
 
         Args:
             user_id: User UUID
@@ -496,54 +518,48 @@ class MemoryManager:
             current_query: Current user query
             include_history: Include conversation history
             include_patterns: Include user pattern analysis
+            current_language: Language for responses
 
         Returns:
-            Dict with context components
+            Dict with context components (backward compatible + enhanced)
         """
-        context = {
-            "current_query": current_query,
-            "session_id": str(session_id),
-            "user_id": str(user_id),
-            "conversation_history": "",
-            "history_messages": [],
-            "previous_places": [],  # Places from previous conversation turns
-            "user_patterns": None,
-        }
-
-        # Get conversation history - optimized to fetch once
-        if include_history:
-            # Fetch history turns once from DB
-            turns = await self.conversation_memory.repository.get_session_history(
-                session_id=session_id,
-                limit=self.conversation_memory.max_turns,
-            )
-            
-            if turns:
-                # Build all views from the same data
-                context["conversation_history"] = (
-                    await self.conversation_memory._build_context_from_turns(turns, session_id)
-                )
-                context["history_messages"] = (
-                    self.conversation_memory._build_messages_from_turns(turns)
-                )
-                context["previous_places"] = (
-                    self.conversation_memory._extract_places_from_turns(turns, limit_turns=3)
-                )
-
-        # Get user patterns
+        # Load context using new ConversationBuffer
+        conv_context = await self.buffer.load_context(
+            user_id=user_id,
+            session_id=session_id,
+            current_query=current_query,
+            current_language=current_language,
+        )
+        
+        # Build agent context using ContextBuilder
+        context = self.builder.build_agent_context_dict(conv_context)
+        
+        # Get user patterns if requested (optional feature)
         if include_patterns:
             context["user_patterns"] = (
                 await self.conversation_memory.get_user_patterns(user_id)
             )
-
-        self.logger.debug(
-            "agent_context_built",
+        else:
+            context["user_patterns"] = None
+        
+        self.logger.info(
+            "agent_context_built_v2",
             user_id=str(user_id),
             session_id=str(session_id),
-            has_history=bool(context["conversation_history"]),
+            has_history=len(conv_context.recent_turns) > 0,
             has_patterns=context["user_patterns"] is not None,
             previous_places_count=len(context.get("previous_places", [])),
+            estimated_tokens=conv_context.estimated_tokens,
         )
 
         return context
+    
+    async def invalidate_session_cache(self, session_id: UUID):
+        """
+        Invalidate cache for a session (call after new message saved).
+        
+        Args:
+            session_id: Session UUID to invalidate
+        """
+        await self.buffer.invalidate_cache(session_id)
 

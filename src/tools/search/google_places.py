@@ -1,269 +1,301 @@
-"""
-Google Places API tool for real-time official place data.
+"""Google Places API tool for direct place search.
 
-🎯 BETA VERSION: This is the PRIMARY search tool for places.
-This tool queries Google Places API directly for the most up-to-date information.
-
-Use this tool for:
-- Real-time place searches
-- Fresh ratings and reviews
-- Current opening hours
-- Live availability data
-- Official business information
-
-Falls back to local_db_fallback_tool if API fails or rate limited.
+🎯 BETA VERSION: Direct Google Places API integration for the agent.
+This is the PRIMARY search tool during beta phase.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 import httpx
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
 
-from src.config.settings import Settings, get_settings
+from src.config.settings import get_settings
 from src.utils.logger import get_logger
-from src.utils.cache_manager import get_cache_manager
 
-logger = get_logger("google_places_primary")
-
-
-class GooglePlaceResult(BaseModel):
-    """Result from Google Places API."""
-    
-    place_id: str
-    name: str
-    formatted_address: str
-    location: Dict[str, float]  # lat, lng
-    rating: Optional[float] = None
-    user_ratings_total: Optional[int] = None
-    price_level: Optional[int] = None
-    types: List[str] = Field(default_factory=list)
-    business_status: Optional[str] = None
-    opening_hours: Optional[Dict[str, Any]] = None
-    photos: Optional[List[str]] = Field(default_factory=list)
+logger = get_logger("google_places_tool")
+settings = get_settings()
 
 
-async def _search_google_places(
-    api_key: str,
-    query: str,
-    location: str = "Zaragoza, Spain",
-    radius: int = 5000,
-    place_type: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Internal function to search Google Places API.
+class GooglePlacesClient:
+    """Client for Google Places API (New) Text Search."""
     
-    API Docs: https://developers.google.com/maps/documentation/places/web-service/search-text
-    """
-    base_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    BASE_URL = "https://places.googleapis.com/v1/places:searchText"
     
-    # Build query parameters
-    params = {
-        "query": f"{query} in {location}",
-        "key": api_key,
-        "radius": radius,
-        "language": "es",  # Return results in Spanish for Zaragoza
-    }
+    def __init__(self):
+        self.api_key = settings.google_places_api_key
+        if not self.api_key:
+            logger.warning("google_places_api_key not configured")
     
-    if place_type:
-        params["type"] = place_type
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(base_url, params=params)
-        response.raise_for_status()
-        data = response.json()
+    async def search_places(
+        self,
+        query: str,
+        location: Optional[Dict[str, float]] = None,
+        radius_meters: int = 5000,
+        max_results: int = 10,
+        language: str = "es",
+    ) -> List[Dict[str, Any]]:
+        """
+        Search places using Google Places API (New).
         
-        if data.get("status") != "OK":
-            logger.error(f"Google Places API error: {data.get('status')} - {data.get('error_message', '')}")
-            return {
-                "status": data.get("status"),
-                "error_message": data.get("error_message", "Unknown error"),
-                "results": [],
+        Args:
+            query: Natural language query (e.g., "restaurantes chinos")
+            location: Optional dict with lat/lng for location bias
+            radius_meters: Search radius in meters (default: 5000m = 5km)
+            max_results: Maximum number of results (default: 10)
+            language: Response language code (default: "es")
+        
+        Returns:
+            List of place dictionaries with normalized fields
+        """
+        if not self.api_key:
+            logger.error("google_places_api_key not configured")
+            return []
+        
+        try:
+            # Build request body
+            request_body = {
+                "textQuery": query,
+                "languageCode": language,
+                "maxResultCount": min(max_results, 20),  # API limit is 20
             }
+            
+            # Add location bias if provided
+            if location and "lat" in location and "lng" in location:
+                request_body["locationBias"] = {
+                    "circle": {
+                        "center": {
+                            "latitude": location["lat"],
+                            "longitude": location["lng"],
+                        },
+                        "radius": radius_meters,
+                    }
+                }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": self.api_key,
+                "X-Goog-FieldMask": (
+                    "places.id,"
+                    "places.displayName,"
+                    "places.formattedAddress,"
+                    "places.location,"
+                    "places.rating,"
+                    "places.userRatingCount,"
+                    "places.priceLevel,"
+                    "places.types,"
+                    "places.primaryType,"
+                    "places.businessStatus,"
+                    "places.googleMapsUri,"
+                    "places.websiteUri,"
+                    "places.internationalPhoneNumber,"
+                    "places.photos"
+                )
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    self.BASE_URL,
+                    json=request_body,
+                    headers=headers,
+                )
+                
+                if response.status_code != 200:
+                    logger.error(
+                        "google_places_api_error",
+                        status_code=response.status_code,
+                        error=response.text,
+                    )
+                    return []
+                
+                data = response.json()
+                places = data.get("places", [])
+                
+                # Normalize to consistent format
+                normalized_places = []
+                for place in places:
+                    normalized = self._normalize_place(place)
+                    normalized_places.append(normalized)
+                
+                logger.info(
+                    "google_places_search_success",
+                    query=query,
+                    results_count=len(normalized_places),
+                )
+                
+                return normalized_places
         
-        return data
+        except Exception as e:
+            logger.error("google_places_search_failed", error=str(e), query=query)
+            return []
+    
+    def _normalize_place(self, place: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize Google Places API response to consistent format."""
+        location = place.get("location", {})
+        display_name = place.get("displayName", {})
+        formatted_address = place.get("formattedAddress", "")
+        
+        # Process photos to get image URLs
+        images = []
+        photos = place.get("photos", [])
+        if photos and isinstance(photos, list):
+            for photo in photos[:3]:  # Get up to 3 photos
+                if isinstance(photo, dict) and photo.get("name"):
+                    # Construct photo URL using Places API (new) format
+                    photo_url = (
+                        f"https://places.googleapis.com/v1/{photo['name']}/media"
+                        f"?maxHeightPx=800&maxWidthPx=800&key={self.api_key}"
+                    )
+                    images.append(photo_url)
+        
+        # Extract neighborhood/district from address
+        # Format: "C. de Ibiza, 23, Retiro, 28009 Madrid, España"
+        # District is usually the 3rd part (index 2)
+        neighborhood = None
+        if formatted_address:
+            parts = [p.strip() for p in formatted_address.split(",")]
+            if len(parts) >= 3:
+                # Try the district part (usually index 2)
+                neighborhood = parts[2]
+            elif len(parts) >= 2:
+                # Fallback to second part
+                neighborhood = parts[1]
+        
+        return {
+            # Core fields
+            "id": place.get("id"),
+            "name": display_name.get("text", "Unknown"),
+            "address": formatted_address,
+            "latitude": location.get("latitude"),
+            "longitude": location.get("longitude"),
+            
+            # Location details
+            "neighborhood": neighborhood,
+            
+            # Ratings
+            "rating": place.get("rating"),
+            "user_ratings_total": place.get("userRatingCount", 0),
+            
+            # Categories
+            "types": place.get("types", []),
+            "primary_type": place.get("primaryType"),
+            
+            # Pricing
+            "price_level": self._parse_price_level(place.get("priceLevel")),
+            
+            # Status
+            "business_status": place.get("businessStatus", "OPERATIONAL"),
+            
+            # Links
+            "google_maps_uri": place.get("googleMapsUri"),
+            "website": place.get("websiteUri"),
+            "phone": place.get("internationalPhoneNumber"),
+            
+            # Images
+            "images": images,
+            
+            # Source
+            "source": "google_places_api",
+        }
+    
+    def _parse_price_level(self, price_level: Optional[str]) -> Optional[int]:
+        """Convert Google's PRICE_LEVEL enum to numeric."""
+        if not price_level:
+            return None
+        
+        price_map = {
+            "PRICE_LEVEL_FREE": 0,
+            "PRICE_LEVEL_INEXPENSIVE": 1,
+            "PRICE_LEVEL_MODERATE": 2,
+            "PRICE_LEVEL_EXPENSIVE": 3,
+            "PRICE_LEVEL_VERY_EXPENSIVE": 4,
+        }
+        
+        return price_map.get(price_level)
 
 
-async def _get_place_details(api_key: str, place_id: str) -> Dict[str, Any]:
-    """
-    Get detailed information for a specific place.
-    
-    API Docs: https://developers.google.com/maps/documentation/places/web-service/details
-    """
-    base_url = "https://maps.googleapis.com/maps/api/place/details/json"
-    
-    params = {
-        "place_id": place_id,
-        "key": api_key,
-        "fields": "name,rating,formatted_phone_number,opening_hours,website,photos,reviews,price_level,types",
-        "language": "es",
-    }
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(base_url, params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get("status") != "OK":
-            logger.error(f"Place Details API error: {data.get('status')}")
-            return {}
-        
-        return data.get("result", {})
+# Singleton client
+_client = GooglePlacesClient()
 
 
 @tool
 async def google_places_tool(
     query: str,
-    location: Optional[str] = "Zaragoza, Spain",
-    radius: int = 5000,
-    place_type: Optional[str] = None,
-    max_results: int = 20,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    radius_meters: int = 5000,
+    max_results: int = 10,
     language: str = "es",
-) -> Dict[str, Any]:
+) -> dict:
     """
-    🎯 PRIMARY SEARCH TOOL: Search for places using Google Places API (real-time data).
+    🎯 PRIMARY SEARCH TOOL - Search for places using Google Places API.
     
-    ⚠️ BETA VERSION: This is the MAIN tool for place searches. It provides:
-    - Real-time, official place information from Google
-    - Current ratings and review counts
-    - Up-to-date contact information
-    - Current opening hours and availability
-    - Fresh photos
-    
-    This tool queries Google Places API directly for the freshest data.
-    If the API fails or is rate-limited, the agent should fall back to
-    search_local_db_fallback_tool for cached data.
+    This is the main tool for finding restaurants, bars, venues, and any place
+    the user is looking for. Use this FIRST for any place-related queries.
     
     Args:
-        query: Search query (e.g., "italian restaurant", "cocktail bar", "tapas")
-        location: Location to search in (default: "Zaragoza, Spain")
-        radius: Search radius in meters (default: 5000, max: 50000)
-        place_type: Type of place (restaurant, bar, cafe, museum, park, etc.)
-        max_results: Maximum results to return (default: 20)
-        language: Language for results ("es" or "en")
+        query: Natural language search query (e.g., "restaurantes chinos", "bares con música en vivo")
+        latitude: Optional latitude for location-based search
+        longitude: Optional longitude for location-based search
+        radius_meters: Search radius in meters (default: 5000m = 5km)
+        max_results: Maximum number of results to return (default: 10, max: 20)
+        language: Response language code (default: "es" for Spanish)
     
     Returns:
-        Dictionary with real-time place results from Google Places API
-    
-    Examples:
-        - google_places_tool("italian restaurant", "Zaragoza, Spain")
-        - google_places_tool("cocktail bar", place_type="bar", max_results=10)
-        - google_places_tool("tapas", location="Zaragoza", radius=3000)
-    
-    Cost: ~$0.032 per request (Places API pricing)
-    """
-    settings = get_settings()
-    
-    # Check if API key is configured
-    if not settings.google_places_api_key:
-        logger.error("GOOGLE_PLACES_API_KEY not configured")
-        return {
-            "error": True,
-            "message": "Google Places API key not configured. Please set GOOGLE_PLACES_API_KEY in environment variables. Fallback to search_local_db_fallback_tool.",
-        }
-    
-    try:
-        logger.info(f"[PRIMARY] Google Places API search: '{query}' near {location} (radius: {radius}m)")
+        Dictionary with:
+        - places: List of place dictionaries with details
+        - count: Number of places found
+        - query: Original query
         
-        # Try to get from cache first (TTL: 1 hour for places)
-        cache = await get_cache_manager()
-        cache_key = cache._generate_key(
-            "google_places",
+    Examples:
+        # Simple search
+        google_places_tool(query="restaurantes italianos")
+        
+        # Location-based search
+        google_places_tool(
+            query="bares cerca de mí",
+            latitude=40.4168,
+            longitude=-3.7038,
+            radius_meters=2000
+        )
+        
+        # Specific query
+        google_places_tool(
+            query="restaurantes chinos con entrega a domicilio en Madrid",
+            max_results=5
+        )
+    """
+    try:
+        # Build location dict if coordinates provided
+        location = None
+        if latitude is not None and longitude is not None:
+            location = {"lat": latitude, "lng": longitude}
+        
+        # Search places
+        places = await _client.search_places(
             query=query,
             location=location,
-            radius=radius,
-            place_type=place_type,
+            radius_meters=radius_meters,
             max_results=max_results,
             language=language,
         )
         
-        cached_result = await cache.get(cache_key)
-        if cached_result:
-            logger.info(f"[CACHE HIT] Google Places: '{query}' near {location}")
-            return cached_result
-        
-        # Search Google Places
-        search_results = await _search_google_places(
-            api_key=settings.google_places_api_key,
-            query=query,
-            location=location,
-            radius=radius,
-            place_type=place_type,
-        )
-        
-        if "error_message" in search_results:
-            logger.error(f"Google Places API error: {search_results['error_message']}")
-            return {
-                "error": True,
-                "message": f"Google Places API error: {search_results['error_message']}. Try search_local_db_fallback_tool.",
-            }
-        
-        # Process results
-        results = search_results.get("results", [])[:max_results]
-        
-        processed_results = []
-        for place in results:
-            processed_place = {
-                "place_id": place.get("place_id"),
-                "name": place.get("name"),
-                "address": place.get("formatted_address"),
-                "location": {
-                    "lat": place.get("geometry", {}).get("location", {}).get("lat"),
-                    "lon": place.get("geometry", {}).get("location", {}).get("lng"),
-                },
-                "rating": place.get("rating"),
-                "user_ratings_total": place.get("user_ratings_total"),
-                "price_level": place.get("price_level"),
-                "types": place.get("types", []),
-                "business_status": place.get("business_status"),
-                "open_now": place.get("opening_hours", {}).get("open_now"),
-            }
-            
-            # Add photos if available
-            if place.get("photos"):
-                photo_reference = place["photos"][0].get("photo_reference")
-                if photo_reference:
-                    processed_place["photo_url"] = (
-                        f"https://maps.googleapis.com/maps/api/place/photo"
-                        f"?maxwidth=400&photo_reference={photo_reference}"
-                        f"&key={settings.google_places_api_key}"
-                    )
-            
-            processed_results.append(processed_place)
-        
-        logger.info(f"[PRIMARY] Found {len(processed_results)} places from Google Places API")
-        
-        result = {
+        return {
+            "success": True,
+            "places": places,
+            "count": len(places),
             "query": query,
             "location": location,
-            "results": processed_results,
-            "total_results": len(processed_results),
-            "source": "google_places_api",
-            "cache_status": "fresh",
-            "api_status": search_results.get("status", "OK"),
-            "language": language,
         }
-        
-        # Cache the result for 1 hour (3600 seconds)
-        await cache.set(cache_key, result, ttl=3600)
-        
-        return result
-        
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error in Google Places API: {str(e)}")
-        logger.warning("Google Places API failed - agent should use search_local_db_fallback_tool")
-        return {
-            "error": True,
-            "message": f"HTTP error calling Google Places API: {str(e)}. Try search_local_db_fallback_tool for cached data.",
-        }
+    
     except Exception as e:
-        logger.error(f"Error in Google Places API search: {str(e)}")
-        logger.warning("Google Places API failed - agent should use search_local_db_fallback_tool")
+        logger.error("google_places_tool_error", error=str(e), query=query)
         return {
-            "error": True,
-            "message": f"Could not search Google Places API: {str(e)}. Try search_local_db_fallback_tool for cached data.",
+            "success": False,
+            "places": [],
+            "count": 0,
+            "query": query,
+            "error": str(e),
         }
-

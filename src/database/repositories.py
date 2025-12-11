@@ -31,7 +31,7 @@ class ConversationRepository:
 
     async def save_turn(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         session_id: UUID,
         user_query: str,
         query_language: str,
@@ -51,7 +51,7 @@ class ConversationRepository:
         Save a conversation turn to database.
 
         Args:
-            user_id: User UUID
+            user_id: User ID (string, supports Auth0 IDs)
             session_id: Session UUID
             user_query: User's query text
             query_language: Language code (es, en, ca, gl)
@@ -135,7 +135,7 @@ class ConversationRepository:
 
     async def get_user_history(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         limit: int = 50,
         hours_back: Optional[int] = None,
     ) -> List[ConversationTurn]:
@@ -143,7 +143,7 @@ class ConversationRepository:
         Get conversation history for a user.
 
         Args:
-            user_id: User UUID
+            user_id: User ID (string, supports Auth0 IDs)
             limit: Maximum number of turns to return
             hours_back: Optional time window (e.g., 24 for last 24 hours)
 
@@ -186,13 +186,13 @@ class ChatRepository:
 
     async def create_chat(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         session_id: UUID,
         title: str,
         mode: Optional[str] = None,
     ) -> Chat:
         """
-        Create a new chat.
+        Create a new chat or return existing one if session_id already exists.
 
         Args:
             user_id: User UUID
@@ -201,8 +201,20 @@ class ChatRepository:
             mode: Optional chat mode (explore/plan)
 
         Returns:
-            Created Chat instance
+            Created or existing Chat instance
         """
+        # Check if chat already exists for this session_id
+        existing_chat = await self.get_chat_by_session_id(session_id)
+        
+        if existing_chat:
+            logger.info(
+                "chat_already_exists",
+                chat_id=str(existing_chat.id),
+                session_id=str(session_id),
+            )
+            return existing_chat
+        
+        # Create new chat
         chat = Chat(
             user_id=user_id,
             session_id=session_id,
@@ -237,7 +249,7 @@ class ChatRepository:
 
     async def get_user_chats(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         limit: int = 50,
         offset: int = 0,
     ) -> List[Chat]:
@@ -245,7 +257,7 @@ class ChatRepository:
         Get all chats for a user, ordered by most recently updated.
 
         Args:
-            user_id: User UUID
+            user_id: User ID (string, supports Auth0 IDs)
             limit: Maximum number of chats to return
             offset: Number of chats to skip
 
@@ -301,7 +313,7 @@ class ChatRepository:
             chat.updated_at = func.now()
             await self.session.flush()
 
-    async def delete_chat(self, chat_id: UUID, user_id: UUID) -> bool:
+    async def delete_chat(self, chat_id: UUID, user_id: str) -> bool:  # user_id changed to str
         """
         Delete a chat (only if it belongs to the user).
 
@@ -333,14 +345,14 @@ class UserPreferenceRepository:
 
     async def get_or_create(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         default_language: str = "es",
     ) -> UserPreference:
         """
         Get existing preferences or create new ones.
 
         Args:
-            user_id: User UUID
+            user_id: User ID (string, supports Auth0 IDs)
             default_language: Default language if creating new
 
         Returns:
@@ -368,7 +380,7 @@ class UserPreferenceRepository:
 
     async def update_preferences(
         self,
-        user_id: UUID,
+        user_id: str,  # Changed to str to support Auth0 IDs
         preferred_language: Optional[str] = None,
         preferred_model: Optional[str] = None,
         budget_mode: Optional[bool] = None,
@@ -378,7 +390,7 @@ class UserPreferenceRepository:
         Update user preferences.
 
         Args:
-            user_id: User UUID
+            user_id: User ID (string, supports Auth0 IDs)
             preferred_language: Optional language to set
             preferred_model: Optional model preference
             budget_mode: Optional budget mode flag

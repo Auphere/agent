@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from src.agents.plan_memory import PlanMemoryManager
+# Removed: from src.agents.plan_memory import PlanMemoryManager (deprecated)
 from src.agents.prompts.system_prompts import get_system_prompt
 from src.agents.utils.place_extractor import extract_places_from_messages
 from src.agents.utils.place_saver import save_places_to_db
@@ -100,49 +100,52 @@ class ReactAgent:
         system_prompt_with_emotion = system_prompt + f"\n\n## 🎯 TONE INSTRUCTION\n{tone}"
         
         # ============ PLAN CONTEXT MANAGEMENT ============
-        # DISABLED: PlanMemoryManager is in-memory and unreliable in production/multi-worker envs.
-        # We rely on full conversation history injection instead.
-        """
-        session_id = context.get("session_id", "default")
+        # ✅ NEW: Extract plan state from conversation metadata (database-backed)
         intention = context.get("intention", "")
         
-        # Get singleton instance for this session
-        plan_mgr = PlanMemoryManager.get_instance(session_id)
-        
         if intention == "PLAN":
-            # Add plan memory context to system prompt
-            plan_summary = plan_mgr.get_context_summary()
-            system_prompt_with_emotion += f"\n\n## 📋 PLAN CONTEXT\n{plan_summary}"
+            from src.agents.context_builder import PlanContextExtractor
             
-            # Mark question asked
-            plan_mgr.mark_question_asked(query)
-            
-            self.logger.info("plan-context-added", summary=plan_summary)
-        """
-
+            # Extract plan state from conversation context
+            memory_context = context.get("memory_context", {})
+            if memory_context and "recent_turns" in memory_context:
+                # This would require passing ConversationContext, but for now
+                # we'll use a simpler approach: extract from query
+                extracted = PlanContextExtractor.extract_from_query(query, language)
+                
+                if extracted:
+                    # Add to system prompt
+                    plan_info = ", ".join(f"{k}: {v}" for k, v in extracted.items())
+                    system_prompt_with_emotion += f"\n\n## 📋 PLAN INFO DETECTED\n{plan_info}"
+                    self.logger.info("plan-info-extracted", extracted=extracted)
+        
         # Prepare messages with conversation history
         messages = [
             SystemMessage(content=system_prompt_with_emotion),
         ]
         
-        # ✅ Inject conversation history if available
+        # ✅ Inject conversation history if available (ENHANCED with new system)
         history_messages = context.get("history_messages", [])
         if history_messages:
-            self.logger.info("agent-using-message-history", count=len(history_messages))
+            self.logger.info(
+                "agent-using-message-history",
+                count=len(history_messages),
+                source="conversation_buffer"
+            )
             messages.extend(history_messages)
         else:
-            # Fallback: Parse string history
+            # Fallback: Parse string history (for backward compatibility)
             conversation_history = context.get("conversation_history", "")
             if conversation_history:
-                self.logger.info("agent-using-history-string", history_length=len(conversation_history))
-                # Parse the history and add as message pairs
-                history_lines = conversation_history.split("\n")
-                for line in history_lines:
-                    line = line.strip()
-                    if line.startswith("User:"):
-                        messages.append(HumanMessage(content=line.replace("User:", "").strip()))
-                    elif line.startswith("Assistant:"):
-                        messages.append(AIMessage(content=line.replace("Assistant:", "").strip()))
+                self.logger.info(
+                    "agent-using-history-string",
+                    history_length=len(conversation_history),
+                    source="legacy"
+                )
+                # Add as single system message for simplicity
+                messages.append(
+                    SystemMessage(content=f"## Previous Conversation:\n{conversation_history}")
+                )
         
         # Add current query
         messages.append(HumanMessage(content=query))

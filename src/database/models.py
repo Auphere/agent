@@ -31,7 +31,7 @@ class ConversationTurn(Base):
     )
 
     # User & session identification
-    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), index=True)
+    user_id: Mapped[str] = mapped_column(String(255), index=True)  # Changed to String to support Auth0 IDs
     session_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), index=True)
 
     # Query details
@@ -84,8 +84,8 @@ class UserPreference(Base):
     __tablename__ = "user_preferences"
 
     # Primary key
-    user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    user_id: Mapped[str] = mapped_column(
+        String(255),  # Changed to String to support Auth0 IDs
         primary_key=True,
     )
 
@@ -128,7 +128,7 @@ class Chat(Base):
     )
 
     # User & session identification
-    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), index=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)  # Changed to String to support Auth0 IDs
     session_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), unique=True, index=True, nullable=False)
 
     # Chat metadata

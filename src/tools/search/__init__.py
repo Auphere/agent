@@ -4,7 +4,7 @@ These tools actively search external sources for place information.
 """
 
 from .web_search import web_search_tool
-from .google_places import google_places_tool
+from .google_places import google_places_tool  # 🎯 BETA: Direct Google Places API
 from .trustpilot import trustpilot_api_tool
 from .apify_scraping import apify_web_scraping_tool
 from .yelp_fusion import yelp_fusion_tool

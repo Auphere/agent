@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.chat_routes import router as chat_router
 from api.routes import router
+from api.streaming_routes import router as streaming_router
 from src.config.settings import get_settings
 from src.database import close_db, init_db
 from src.utils.cache_manager import get_cache_manager
@@ -94,6 +95,7 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(chat_router)
+app.include_router(streaming_router)
 
 
 @app.get("/")

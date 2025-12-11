@@ -1,5 +1,13 @@
 """
 Plan-specific memory management for tracking plan creation context.
+
+⚠️ DEPRECATED: This in-memory approach is unreliable in production (multi-worker environments).
+
+Replaced by:
+- Database-backed plan state in ConversationTurn.extra_metadata
+- PlanContextExtractor in context_builder.py for extracting plan state
+
+This file is kept for backward compatibility but should not be used in new code.
 """
 
 from __future__ import annotations
