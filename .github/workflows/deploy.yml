@@ -131,7 +131,7 @@ jobs:
             }' \
             --health-check-configuration '{
               "Protocol": "HTTP",
-              "Path": "/health",
+              "Path": "/agent/health",
               "Interval": 10,
               "Timeout": 5,
               "HealthyThreshold": 3,
@@ -159,9 +159,11 @@ jobs:
       - name: Wait for deployment
         run: |
           echo "Waiting for App Runner service to be ready..."
-          aws apprunner wait service-running \
-            --service-arn "arn:aws:apprunner:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:service/${{ env.SERVICE_NAME }}" \
-            --region ${{ env.AWS_REGION }} || true
+          echo "⏳ Service deployment started. This will take 3-5 minutes."
+          echo "📋 Service URL will be available once deployment completes."
+          echo "✅ Check AWS Console or use: aws apprunner describe-service --service-arn 'arn:aws:apprunner:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:service/${{ env.SERVICE_NAME }}' --region ${{ env.AWS_REGION }}"
+          # App Runner doesn't have a wait command, so we just inform
+          # The deployment will continue in the background
 
       - name: Get service URL
         run: |
