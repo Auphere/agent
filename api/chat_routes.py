@@ -82,15 +82,27 @@ async def get_user_chats(
         ) from exc
 
 
-@router.get("/{chat_id}", response_model=ChatResponse, status_code=status.HTTP_200_OK)
+@router.get("/{id_or_session}", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 async def get_chat(
-    chat_id: str,
+    id_or_session: str,
     chat_repo: ChatRepository = Depends(get_chat_repo),
 ) -> ChatResponse:
-    """Get a specific chat by ID."""
+    """Get a specific chat by either Chat ID or Session ID."""
     try:
-        chat_uuid = UUID(chat_id)
-        chat = await chat_repo.get_chat_by_id(chat_uuid)
+        try:
+            uuid_val = UUID(id_or_session)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid ID format (must be a valid UUID)",
+            )
+        
+        # Try Chat ID first
+        chat = await chat_repo.get_chat_by_id(uuid_val)
+        
+        # If not found, try Session ID
+        if not chat:
+            chat = await chat_repo.get_chat_by_session_id(uuid_val)
         
         if not chat:
             raise HTTPException(
@@ -108,32 +120,39 @@ async def get_chat(
             updated_at=chat.updated_at.isoformat(),
         )
         
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid chat_id format",
-        )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("failed_to_get_chat", chat_id=chat_id, error=str(exc))
+        logger.error("failed_to_get_chat", chat_id=id_or_session, error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve chat: {str(exc)}",
         ) from exc
 
 
-@router.get("/{chat_id}/history", response_model=ChatHistoryResponse, status_code=status.HTTP_200_OK)
+@router.get("/{id_or_session}/history", response_model=ChatHistoryResponse, status_code=status.HTTP_200_OK)
 async def get_chat_history(
-    chat_id: str,
+    id_or_session: str,
     chat_repo: ChatRepository = Depends(get_chat_repo),
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
     limit: int = 50,
 ) -> ChatHistoryResponse:
-    """Get the full message history for a chat."""
+    """Get the full message history for a chat by either Chat ID or Session ID."""
     try:
-        chat_uuid = UUID(chat_id)
-        chat = await chat_repo.get_chat_by_id(chat_uuid)
+        try:
+            uuid_val = UUID(id_or_session)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid ID format (must be a valid UUID)",
+            )
+        
+        # Try to find by Chat ID first
+        chat = await chat_repo.get_chat_by_id(uuid_val)
+        
+        # If not found, try to find by Session ID
+        if not chat:
+            chat = await chat_repo.get_chat_by_session_id(uuid_val)
 
         if not chat:
             raise HTTPException(
@@ -180,15 +199,10 @@ async def get_chat_history(
             messages=messages,
         )
 
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid chat_id format",
-        )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("failed_to_get_chat_history", chat_id=chat_id, error=str(exc))
+        logger.error("failed_to_get_chat_history", chat_id=id_or_session, error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve chat history: {str(exc)}",
@@ -268,34 +282,33 @@ async def create_chat(
         ) from exc
 
 
-@router.patch("/{chat_id}", response_model=ChatResponse, status_code=status.HTTP_200_OK)
+@router.patch("/{id_or_session}", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 async def update_chat(
-    chat_id: str,
+    id_or_session: str,
     request: ChatUpdateRequest,
     chat_repo: ChatRepository = Depends(get_chat_repo),
 ) -> ChatResponse:
-    """Update a chat (currently only title and mode)."""
+    """Update a chat (currently only title and mode) by either Chat ID or Session ID."""
     try:
-        chat_uuid = UUID(chat_id)
+        uuid_val = UUID(id_or_session)
+        
+        # Find the chat first to get the real ID
+        chat = await chat_repo.get_chat_by_id(uuid_val)
+        if not chat:
+            chat = await chat_repo.get_chat_by_session_id(uuid_val)
+            
+        if not chat:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat not found",
+            )
+            
+        chat_uuid = chat.id
         
         if request.title:
             chat = await chat_repo.update_chat_title(chat_uuid, request.title)
-            if not chat:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Chat not found",
-                )
-        else:
-            chat = await chat_repo.get_chat_by_id(chat_uuid)
-            if not chat:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Chat not found",
-                )
         
-        # TODO: Add mode update if needed
-        
-        logger.info("chat_updated", chat_id=chat_id)
+        logger.info("chat_updated", chat_id=str(chat_uuid))
         
         return ChatResponse(
             id=str(chat.id),
@@ -322,32 +335,48 @@ async def update_chat(
         ) from exc
 
 
-@router.delete("/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{id_or_session}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_chat(
-    chat_id: str,
+    id_or_session: str,
     user_id: str,
     chat_repo: ChatRepository = Depends(get_chat_repo),
 ) -> None:
     """
-    Delete a chat.
+    Delete a chat by either Chat ID or Session ID.
     
     Args:
-        chat_id: Chat UUID to delete
+        id_or_session: Chat UUID or Session UUID to delete
         user_id: User UUID (for security - only owner can delete)
     """
     try:
-        chat_uuid = UUID(chat_id)
-        # user_id now accepts string (Auth0 IDs)
+        uuid_val = UUID(id_or_session)
         
-        deleted = await chat_repo.delete_chat(chat_uuid, user_id)
+        # Find the chat first to get the real ID and owner
+        chat = await chat_repo.get_chat_by_id(uuid_val)
+        if not chat:
+            chat = await chat_repo.get_chat_by_session_id(uuid_val)
+            
+        if not chat:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat not found",
+            )
+            
+        if chat.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to delete this chat",
+            )
+            
+        deleted = await chat_repo.delete_chat(chat.id, user_id)
         
         if not deleted:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found or you don't have permission to delete it",
+                detail="Chat not found",
             )
         
-        logger.info("chat_deleted", chat_id=chat_id, user_id=user_id)
+        logger.info("chat_deleted", chat_id=str(chat.id), user_id=user_id)
         
     except ValueError:
         raise HTTPException(
