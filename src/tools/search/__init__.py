@@ -14,6 +14,19 @@ from .instagram import instagram_hashtag_tool
 from .spotify import spotify_api_tool
 from .weather import weather_api_tool
 
+# NEW: Advanced enrichment tools
+from .foursquare_v2 import (
+    search_foursquare_places,
+    get_foursquare_place_enrichment,
+)
+from .apify_enrichment import (
+    scrape_instagram_place,
+    scrape_tiktok_place,
+    scrape_tripadvisor_reviews,
+    get_social_media_summary,
+)
+from .geocoding import geocode_city_tool
+
 __all__ = [
     "web_search_tool",
     "google_places_tool",
@@ -25,5 +38,14 @@ __all__ = [
     "instagram_hashtag_tool",
     "spotify_api_tool",
     "weather_api_tool",
+    # NEW
+    "search_foursquare_places",
+    "get_foursquare_place_enrichment",
+    "scrape_instagram_place",
+    "scrape_tiktok_place",
+    "scrape_tripadvisor_reviews",
+    "get_social_media_summary",
+    "geocode_city_tool",
 ]
+
 

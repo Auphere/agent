@@ -63,19 +63,66 @@ def _normalize_new_plan_format(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
     # Stops detailed - normalize each stop's structure
     raw_stops = raw_plan.get("stops", [])
     stops_detailed = []
-    for stop in raw_stops:
-        # Normalize vibes within stop details
-        if stop.get("details") and stop["details"].get("vibes"):
+    for idx, stop in enumerate(raw_stops or []):
+        if not isinstance(stop, dict):
+            continue
+
+        # Handle "semi-legacy" stops: { place, duration, startTime, activity }
+        # Some agents may pass stops in this shape even under the "new plan" container.
+        if "timing" not in stop and "place" in stop:
+            place = stop.get("place") or {}
+            duration = int(stop.get("duration") or 60)
+            start_time = stop.get("startTime") or stop.get("start_time") or "TBD"
+            activity = stop.get("activity") or "Visit"
+
+            stop = {
+                "stopNumber": idx + 1,
+                "localId": place.get("id") or place.get("name") or f"stop-{idx + 1}",
+                "name": place.get("name") or "Unknown",
+                "category": activity,
+                "typeLabel": activity,
+                "timing": {
+                    "recommendedStart": start_time,
+                    "suggestedDurationMinutes": duration,
+                    "estimatedEnd": "TBD",
+                },
+                "location": {
+                    "address": place.get("address"),
+                    "lat": (place.get("location") or {}).get("lat"),
+                    "lng": (place.get("location") or {}).get("lng") or (place.get("location") or {}).get("lon"),
+                    "zone": place.get("neighborhood"),
+                    "travelTimeFromPreviousMinutes": None,
+                },
+                "details": {
+                    "vibes": vibes if isinstance(vibes, list) else [],
+                    "targetAudience": [],
+                    "music": None,
+                    "noiseLevel": None,
+                    "averageSpendPerPerson": None,
+                },
+                "selectionReasons": [],
+                "actions": {
+                    "canReserve": False,
+                    "reservationUrl": place.get("website"),
+                    "googleMapsUrl": place.get("googleMapsUrl") or place.get("google_maps_uri") or place.get("google_maps_uri"),
+                    "phone": place.get("phone"),
+                },
+                "alternatives": None,
+                "personalTips": None,
+            }
+
+        # Normalize vibes within stop details (supports snake_case and camelCase)
+        if stop.get("details") and (stop["details"].get("vibes") is not None):
             vibes_field = stop["details"]["vibes"]
             if not isinstance(vibes_field, list):
                 stop["details"]["vibes"] = [vibes_field] if vibes_field else []
-        
-        # Normalize target_audience to array
-        if stop.get("details") and stop["details"].get("target_audience"):
+
+        # Normalize target_audience to array (supports snake_case and camelCase)
+        if stop.get("details") and (stop["details"].get("target_audience") is not None):
             target_audience = stop["details"]["target_audience"]
             if not isinstance(target_audience, list):
                 stop["details"]["target_audience"] = [target_audience] if target_audience else []
-        
+
         # Convert snake_case keys to camelCase for frontend
         stop_camel = convert_keys_to_camel(stop)
         stops_detailed.append(stop_camel)
@@ -87,23 +134,23 @@ def _normalize_new_plan_format(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
         stops_simple.append(
             {
                 "place": {  # minimal placeholder; UI mainly uses stopsDetailed
-                    "id": stop.get("local_id") or stop.get("name"),
-                    "name": stop.get("name"),
-                    "address": stop.get("location", {}).get("address"),
+                    "id": stop.get("localId") or stop.get("local_id") or stop.get("name"),
+                    "name": stop.get("name") or (stop.get("place") or {}).get("name"),
+                    "address": (stop.get("location") or {}).get("address") or (stop.get("place") or {}).get("address"),
                 },
-                "duration": int(timing.get("suggested_duration_minutes", 60)),
-                "startTime": timing.get("recommended_start") or "19:00",
-                "activity": stop.get("type_label") or stop.get("category") or "Visit",
+                "duration": int(timing.get("suggestedDurationMinutes") or timing.get("suggested_duration_minutes") or stop.get("duration") or 60),
+                "startTime": timing.get("recommendedStart") or timing.get("recommended_start") or stop.get("startTime") or "19:00",
+                "activity": stop.get("typeLabel") or stop.get("type_label") or stop.get("category") or stop.get("activity") or "Visit",
             }
         )
 
     # Compute numeric totals if available
     total_duration_minutes = 0
-    if summary and summary.get("total_duration"):
-        total_duration_minutes = _parse_duration_string(summary["total_duration"])
+    if summary and (summary.get("totalDuration") or summary.get("total_duration")):
+        total_duration_minutes = _parse_duration_string(summary.get("totalDuration") or summary.get("total_duration"))
     total_distance_km = None
-    if summary and summary.get("total_distance_km") is not None:
-        total_distance_km = float(summary["total_distance_km"])
+    if summary and (summary.get("totalDistanceKm") is not None or summary.get("total_distance_km") is not None):
+        total_distance_km = float(summary.get("totalDistanceKm") if summary.get("totalDistanceKm") is not None else summary.get("total_distance_km"))
 
     normalized = {
         "id": str(plan_id) if plan_id else None,

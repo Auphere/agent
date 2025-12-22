@@ -28,6 +28,7 @@ from src.database import ChatRepository, ConversationRepository
 from src.i18n import Translator
 from src.routers.llm_router import LLMRouter
 from src.utils.logger import get_logger
+from src.utils.normalizers import normalize_plan
 from src.utils.title_generator import generate_chat_title
 from src.validators.context_validator import ContextValidator
 from src.validators.schemas import ContextValidationError
@@ -135,22 +136,75 @@ async def stream_agent_response(
         
         supervisor = SupervisorAgent()
         
-        yield f"event: status\ndata: {json.dumps({'content': '⚡ Ejecutando agente especializado...'})}\n\n"
-        await asyncio.sleep(0.1)
+        # Better status messages based on intent
+        intent_name = intent_result.intention.value
+        if intent_name == "PLAN":
+            yield f"event: status\ndata: {json.dumps({'content': '📋 Creando plan detallado paso a paso...'})}\n\n"
+            await asyncio.sleep(0.1)
+            yield f"event: thought\ndata: {json.dumps({'content': '💭 **Planificador**: Analizando tu solicitud para crear el mejor itinerario'})}\n\n"
+        elif intent_name == "SEARCH":
+            yield f"event: status\ndata: {json.dumps({'content': '🔍 Buscando lugares perfectos para ti...'})}\n\n"
+            await asyncio.sleep(0.1)
+            yield f"event: thought\ndata: {json.dumps({'content': '💭 **Buscador**: Explorando bases de datos de millones de lugares'})}\n\n"
+        elif intent_name == "RECOMMEND":
+            yield f"event: status\ndata: {json.dumps({'content': '⭐ Generando recomendaciones personalizadas...'})}\n\n"
+            await asyncio.sleep(0.1)
+            yield f"event: thought\ndata: {json.dumps({'content': '💭 **Recomendador**: Analizando opciones y rankings'})}\n\n"
+        else:
+            yield f"event: status\ndata: {json.dumps({'content': '⚡ Ejecutando agente especializado...'})}\n\n"
+            await asyncio.sleep(0.1)
         
-        # Show agent thinking
-        thought_data = {
-            "content": f"💭 **Razonando**: Voy a buscar {request.query[:50]}... en la base de datos de lugares"
-        }
-        yield f"event: thought\ndata: {json.dumps(thought_data)}\n\n"
         await asyncio.sleep(0.2)
         
+        # Show what sources we'll use
+        if intent_name == "PLAN":
+            yield f"event: status\ndata: {json.dumps({'content': '🌐 Consultando: Foursquare (105M POIs), Instagram, TikTok, TripAdvisor...'})}\n\n"
+            await asyncio.sleep(0.2)
+            yield f"event: thought\ndata: {json.dumps({'content': '💭 **Paso 1**: Buscando lugares que coincidan con tus preferencias'})}\n\n"
+        elif intent_name == "SEARCH":
+            yield f"event: status\ndata: {json.dumps({'content': '🌐 Consultando: Google Places, Foursquare, base de datos local...'})}\n\n"
+        
         # Execute agent (this is the actual work)
+        # Periodic status updates during execution
+        
+        # Create a task for the agent execution
+        async def execute_with_progress():
+            # Status updater task
+            async def show_progress():
+                progress_messages = [
+                    "🔍 Analizando millones de lugares...",
+                    "📊 Evaluando ratings y reseñas...",
+                    "📸 Consultando contenido en redes sociales...",
+                    "⭐ Priorizando las mejores opciones...",
+                    "🗺️ Calculando rutas óptimas...",
+                    "✨ Finalizando recomendaciones...",
+                ]
+                
+                for msg in progress_messages:
+                    await asyncio.sleep(3)  # Update every 3 seconds
+                    yield f"event: status\ndata: {json.dumps({'content': msg})}\n\n"
+            
+            # Run agent
+            return await supervisor.run(
+                query=request.query,
+                intent=intent_result.intention,
+                language=request.language or "es",
+                context=agent_context,
+            )
+        
+        # Execute agent
         # ✅ FIX: Merge memory_context directly into context (not nested)
+        # ✅ FIX: Serialize datetime objects to strings
+        validated_context_dict = validated_context.dict()
+        # Convert any datetime objects to ISO format strings
+        for key, value in validated_context_dict.items():
+            if hasattr(value, 'isoformat'):
+                validated_context_dict[key] = value.isoformat()
+        
         agent_context = {
             "user_id": str(user_id),
             "session_id": str(session_uuid),
-            "validated_context": validated_context.dict(),
+            "validated_context": validated_context_dict,
             **memory_context,  # ← Unpack memory_context directly
         }
         
@@ -209,7 +263,8 @@ async def stream_agent_response(
         processing_time_partial = int((perf_counter() - start_time) * 1000)
         
         # ✅ Enhanced: Extract plan state for PLAN intention
-        extra_metadata = {"plan": agent_result.get("plan")}
+        raw_plan_meta = agent_result.get("plan")
+        extra_metadata = {"plan": normalize_plan(raw_plan_meta) if raw_plan_meta else None}
         
         if intent_result.intention.value == "PLAN":
             from src.agents.context_builder import PlanContextExtractor
@@ -247,10 +302,13 @@ async def stream_agent_response(
         # Step 8: Send final response
         processing_time = int((perf_counter() - start_time) * 1000)
         
+        raw_plan = agent_result.get("plan")
+        normalized_plan = normalize_plan(raw_plan) if raw_plan else None
+
         end_data = {
             "content": response_text,
             "places": agent_result.get("places", []),
-            "plan": agent_result.get("plan"),
+            "plan": normalized_plan,
             "metadata": {
                 "intention": intent_result.intention.value,
                 "confidence": intent_result.confidence,

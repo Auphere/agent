@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from src.agents.react_agent import ReactAgent  # Fallback
 from src.agents.specialized import PlanAgent, RecommendAgent, SearchAgent
+from src.agents.specialized.plan_and_execute_agent import PlanAndExecuteAgent
 from src.classifiers.models import IntentType
 from src.config.settings import Settings, get_settings
 from src.utils.logger import get_logger
@@ -36,6 +37,7 @@ class SupervisorAgent:
         # Lazy-initialized agents (only created when needed)
         self._search_agent = None
         self._plan_agent = None
+        self._plan_and_execute_agent = None  # NEW: Advanced planning agent
         self._recommend_agent = None
         self._fallback_agent = None
         
@@ -48,10 +50,16 @@ class SupervisorAgent:
         return self._search_agent
     
     def _get_plan_agent(self) -> PlanAgent:
-        """Lazy initialization of PlanAgent."""
+        """Lazy initialization of PlanAgent (legacy)."""
         if self._plan_agent is None:
             self._plan_agent = PlanAgent(settings=self.settings)
         return self._plan_agent
+    
+    def _get_plan_and_execute_agent(self) -> PlanAndExecuteAgent:
+        """Lazy initialization of Plan-and-Execute Agent (new, advanced)."""
+        if self._plan_and_execute_agent is None:
+            self._plan_and_execute_agent = PlanAndExecuteAgent(settings=self.settings)
+        return self._plan_and_execute_agent
     
     def _get_recommend_agent(self) -> RecommendAgent:
         """Lazy initialization of RecommendAgent."""
@@ -103,8 +111,9 @@ class SupervisorAgent:
                 result = await self._get_search_agent().run(query, language, context)
                 
             elif intent == IntentType.PLAN:
-                self.logger.info("routing-to-plan-agent")
-                result = await self._get_plan_agent().run(query, language, context)
+                # Use new Plan-and-Execute agent for better quality
+                self.logger.info("routing-to-plan-and-execute-agent")
+                result = await self._get_plan_and_execute_agent().run(query, language, context)
                 
             elif intent == IntentType.RECOMMEND:
                 self.logger.info("routing-to-recommend-agent")

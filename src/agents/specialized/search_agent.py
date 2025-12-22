@@ -91,14 +91,39 @@ class SearchAgent:
         # ✅ Inject conversation history if available
         history_messages = context.get("history_messages", [])
         if history_messages:
-             messages.extend(history_messages)
+            messages.extend(history_messages)
         else:
-             # Fallback string injection
-             conversation_history = context.get("conversation_history", "")
-             if conversation_history:
+            # Fallback string injection
+            conversation_history = context.get("conversation_history", "")
+            if conversation_history:
                 messages[0].content += f"\n\n## Previous Conversation:\n{conversation_history}"
         
-        messages.append(HumanMessage(content=query))
+        # 🔴 CRITICAL FIX: Force tool usage for search queries
+        query_lower = query.lower()
+        requires_search = any([
+            "busca" in query_lower,
+            "encuentra" in query_lower,
+            "muestra" in query_lower,
+            "search" in query_lower,
+            "find" in query_lower,
+            "show" in query_lower,
+            "dame" in query_lower,
+            "give me" in query_lower,
+            # Place types
+            "restaurante" in query_lower,
+            "bar" in query_lower,
+            "cafe" in query_lower,
+            "club" in query_lower,
+            "lugar" in query_lower,
+            "sitio" in query_lower,
+            "place" in query_lower,
+        ])
+        
+        # Add instruction to FORCE tool usage
+        if requires_search:
+            messages.append(HumanMessage(content=f"{query}\n\n🔴 MANDATORY: You MUST call google_places_tool to search for places. DO NOT respond without searching first."))
+        else:
+            messages.append(HumanMessage(content=query))
         
         try:
             # Execute agent

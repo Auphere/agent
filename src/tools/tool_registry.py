@@ -27,6 +27,13 @@ from src.tools.search import (
     google_places_tool,  # 🎯 BETA PRIMARY: Direct Google Places API
     web_search_tool,
     weather_api_tool,
+    search_foursquare_places,  # NEW: Foursquare v2 (105M POIs)
+    get_foursquare_place_enrichment,  # NEW: Foursquare details
+    scrape_instagram_place,  # NEW: Instagram scraping
+    scrape_tiktok_place,  # NEW: TikTok scraping
+    scrape_tripadvisor_reviews,  # NEW: TripAdvisor scraping
+    get_social_media_summary,  # NEW: Combined social media data
+    geocode_city_tool,  # NEW: Geocoding
 )
 
 # NEW: Database tools (fallback)
@@ -104,32 +111,50 @@ def get_available_tools() -> List[BaseTool]:
     🎯 BETA VERSION - Tool Priority Order:
     
     SEARCH TOOLS (Real-time data):
-    1. google_places_tool - PRIMARY search for places (Google Places API direct)
-    2. web_search_tool - Web search for reviews, events, context
-    3. weather_api_tool - Weather for indoor/outdoor recommendations
+    1. geocode_city_tool - Geocode city/area to coordinates
+    2. google_places_tool - PRIMARY search for places (Google Places API direct)
+    3. search_foursquare_places - 105M+ global POIs with rich metadata
+    4. get_foursquare_place_enrichment - Detailed Foursquare data
+    5. web_search_tool - Web search for reviews, events, context
+    6. weather_api_tool - Weather for indoor/outdoor recommendations
+    
+    SOCIAL MEDIA ENRICHMENT:
+    6. scrape_instagram_place - Instagram posts and trends
+    7. scrape_tiktok_place - TikTok videos and viral content
+    8. scrape_tripadvisor_reviews - Detailed reviews
+    9. get_social_media_summary - Combined social media data
     
     PROCESSING TOOLS:
-    4. calculate_route_tool - Route optimization and travel times
-    5. rank_by_score_tool - Multi-factor scoring for recommendations
-    6. generate_itinerary_tool - Advanced itinerary generation
+    10. calculate_route_tool - Route optimization and travel times
+    11. rank_by_score_tool - Multi-factor scoring for recommendations
+    12. generate_itinerary_tool - Advanced itinerary generation
     
     DATABASE TOOLS (Fallback/Analytics):
-    7. search_local_db_fallback_tool - Query local cached data
-    8. get_local_metrics_tool - B2B analytics
-    9. get_user_preferences_tool - User preferences
+    13. search_local_db_fallback_tool - Query local cached data
+    14. get_local_metrics_tool - B2B analytics
+    15. get_user_preferences_tool - User preferences
     
     CONTEXT TOOLS:
-    10. update_plan_context_tool - Save plan details to memory
+    16. update_plan_context_tool - Save plan details to memory
     
     LEGACY TOOLS (Being phased out):
-    11. search_places_tool - Old search (use google_places_tool instead)
-    12. create_itinerary_tool_legacy - Old itinerary (use generate_itinerary_tool)
+    17. search_places_tool - Old search (use google_places_tool instead)
+    18. create_itinerary_tool_legacy - Old itinerary (use generate_itinerary_tool)
     """
     return [
         # PRIMARY SEARCH TOOLS (External APIs - Real-time)
+        geocode_city_tool,            # Geocode first when city provided
         google_places_tool,           # 🎯 PRIMARY place search (Google Places API direct)
+        search_foursquare_places,     # NEW: Foursquare 105M+ POIs
+        get_foursquare_place_enrichment,  # NEW: Foursquare details
         web_search_tool,              # Web search for context
         weather_api_tool,             # Weather context
+        
+        # SOCIAL MEDIA ENRICHMENT (NEW)
+        scrape_instagram_place,       # Instagram posts
+        scrape_tiktok_place,          # TikTok videos
+        scrape_tripadvisor_reviews,   # TripAdvisor reviews
+        get_social_media_summary,     # Combined social media
         
         # PROCESSING TOOLS
         calculate_route_tool,         # Routing and distances
@@ -158,8 +183,16 @@ def get_core_tools() -> List[BaseTool]:
     return [
         # Search
         google_places_tool,
+        search_foursquare_places,
+        get_foursquare_place_enrichment,
         web_search_tool,
         weather_api_tool,
+        
+        # Social Media
+        scrape_instagram_place,
+        scrape_tiktok_place,
+        scrape_tripadvisor_reviews,
+        get_social_media_summary,
         
         # Processing
         calculate_route_tool,
@@ -182,7 +215,9 @@ def get_search_tools() -> List[BaseTool]:
     Optimized for fast place lookups.
     """
     return [
+        geocode_city_tool,            # Geocode bias
         google_places_tool,           # PRIMARY search (Google Places API direct)
+        search_foursquare_places,     # Foursquare 105M POIs
         web_search_tool,              # Additional context
         search_local_db_fallback_tool, # Fallback
     ]
@@ -192,12 +227,19 @@ def get_plan_tools() -> List[BaseTool]:
     """
     Get tools for PlanAgent (itinerary creation).
     
-    Optimized for multi-location planning.
+    Optimized for multi-location planning with rich data.
     """
     from src.tools.generate_plan_json_tool import generate_plan_json_tool
     
     return [
+        geocode_city_tool,           # Geocode city/area
         google_places_tool,          # Find places (Google Places API direct)
+        search_foursquare_places,    # Foursquare rich POI data
+        get_foursquare_place_enrichment,  # Detailed place info
+        scrape_instagram_place,      # Visual content
+        scrape_tiktok_place,         # Trending content
+        scrape_tripadvisor_reviews,  # Reviews
+        get_social_media_summary,    # Combined social data
         weather_api_tool,            # Weather context
         calculate_route_tool,        # Route optimization
         rank_by_score_tool,         # Rank options
@@ -212,12 +254,16 @@ def get_recommend_tools() -> List[BaseTool]:
     """
     Get tools for RecommendAgent (recommendations and comparisons).
     
-    Optimized for ranking and scoring.
+    Optimized for ranking and scoring with social proof.
     """
     return [
         google_places_tool,          # Find candidates (Google Places API direct)
+        search_foursquare_places,    # Foursquare data
+        get_foursquare_place_enrichment,  # Detailed info
         weather_api_tool,            # Weather context
         rank_by_score_tool,         # PRIMARY for recommendations
+        scrape_instagram_place,      # Social proof
+        scrape_tripadvisor_reviews,  # Reviews
         web_search_tool,            # Reviews and context
         search_local_db_fallback_tool, # Fallback
     ]
