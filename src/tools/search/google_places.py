@@ -14,9 +14,14 @@ from langchain_core.tools import tool
 
 from src.config.settings import get_settings
 from src.utils.logger import get_logger
+from src.utils.cache_manager import get_cache_manager
+from src.utils.rate_limiter import get_rate_limiter, RateLimitExceeded
 
 logger = get_logger("google_places_tool")
 settings = get_settings()
+
+# Cache TTL for places (15 minutes - places don't change often)
+PLACES_CACHE_TTL = 900
 
 
 class GooglePlacesClient:
@@ -55,6 +60,16 @@ class GooglePlacesClient:
             return []
         
         try:
+            # Check rate limit
+            rate_limiter = await get_rate_limiter()
+            if not await rate_limiter.is_allowed("google_places"):
+                remaining = await rate_limiter.get_remaining("google_places")
+                logger.warning(
+                    "google_places_rate_limited",
+                    remaining=remaining,
+                )
+                return []
+            
             # Build request body
             request_body = {
                 "textQuery": query,
@@ -118,6 +133,9 @@ class GooglePlacesClient:
                 for place in places:
                     normalized = self._normalize_place(place)
                     normalized_places.append(normalized)
+                
+                # Record successful request for rate limiting
+                await rate_limiter.record_request("google_places")
                 
                 logger.info(
                     "google_places_search_success",
@@ -273,7 +291,25 @@ async def google_places_tool(
         if latitude is not None and longitude is not None:
             location = {"lat": latitude, "lng": longitude}
         
-        # Search places
+        # Try cache first
+        cache = await get_cache_manager()
+        cache_key = cache._generate_key(
+            "places",
+            query=query.lower().strip(),  # Normalize query for better cache hits
+            lat=round(latitude, 3) if latitude else None,  # Round coords for cache
+            lng=round(longitude, 3) if longitude else None,
+            radius=radius_meters,
+            max_results=max_results,
+            lang=language,
+        )
+        
+        cached_result = await cache.get(cache_key)
+        if cached_result:
+            logger.info(f"[CACHE HIT] google_places: {query}")
+            return cached_result
+        
+        # Cache miss - search places
+        logger.info(f"[CACHE MISS] google_places: {query}")
         places = await _client.search_places(
             query=query,
             location=location,
@@ -282,13 +318,18 @@ async def google_places_tool(
             language=language,
         )
         
-        return {
+        result = {
             "success": True,
             "places": places,
             "count": len(places),
             "query": query,
             "location": location,
         }
+        
+        # Cache the result (15 minutes TTL)
+        await cache.set(cache_key, result, ttl=PLACES_CACHE_TTL)
+        
+        return result
     
     except Exception as e:
         logger.error("google_places_tool_error", error=str(e), query=query)

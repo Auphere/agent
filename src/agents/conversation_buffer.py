@@ -122,8 +122,8 @@ class ConversationBuffer:
     DEFAULT_LONG_TERM_TURNS = 50   # Turns to consider for summarization
     DEFAULT_MAX_TOKENS = 4000      # Token budget for context
     COMPRESSION_THRESHOLD = 0.8    # Compress when 80% of token budget used
-    CACHE_TTL_SHORT = 300          # 5 minutes for short-term cache
-    CACHE_TTL_LONG = 3600          # 1 hour for long-term cache
+    CACHE_TTL_SHORT = 1800          # 30 minutes for short-term cache (increased from 5 min)
+    CACHE_TTL_LONG = 7200          # 2 hours for long-term cache (increased from 1 hour)
     
     def __init__(
         self,

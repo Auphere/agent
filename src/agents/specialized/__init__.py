@@ -1,8 +1,15 @@
 """Specialized agents for different query types."""
 
+from .base_agent import BaseSpecializedAgent, AgentState
 from .search_agent import SearchAgent
-from .plan_agent import PlanAgent
 from .recommend_agent import RecommendAgent
+from .plan_and_execute_agent import PlanAndExecuteAgent
 
-__all__ = ["SearchAgent", "PlanAgent", "RecommendAgent"]
+__all__ = [
+    "BaseSpecializedAgent",
+    "AgentState",
+    "SearchAgent",
+    "RecommendAgent",
+    "PlanAndExecuteAgent",
+]
 

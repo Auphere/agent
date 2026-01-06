@@ -4,21 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import BaseTool
 
+from src.agents.specialized.base_agent import BaseSpecializedAgent
 from src.agents.prompts.search_prompts import get_search_agent_prompt
-from src.agents.utils.place_extractor import extract_places_from_messages
-from src.agents.utils.place_saver import save_places_to_db
-from src.agents.utils.text_cleaner import clean_response_text
-from src.agents.utils.response_parser import extract_final_answer
-from src.config.settings import Settings, get_settings
+from src.config.settings import Settings
 from src.tools.tool_registry import get_search_tools
-from src.utils.logger import get_logger
 
 
-class SearchAgent:
+class SearchAgent(BaseSpecializedAgent):
     """
     Specialized agent optimized for fast place searches.
     
@@ -27,157 +21,75 @@ class SearchAgent:
     - Focuses on google_places_tool
     - Quick, concise responses
     - Minimal reasoning steps
+    - Uses bind_tools with tool_choice for reliable tool usage
     
     Best for:
     - "Find X in Y"
     - "Show me places"
     - "Search for..."
     """
+    
+    @property
+    def agent_type(self) -> str:
+        return "search"
 
     def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
-        self.logger = get_logger("search-agent", settings=self.settings)
-        
-        # Always use gpt-4o-mini for searches (fast and cheap)
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.3,  # Lower temperature for more consistent searches
-            api_key=self.settings.openai_api_key,
-            timeout=15,  # Fast timeout for searches (was 30s)
-            max_retries=0,  # No retries for speed
-            request_timeout=15,
-        )
-        
-        # Get only search-relevant tools
-        self.tools = get_search_tools()
-        
-        # Create agent
-        self.agent_executor = create_react_agent(
-            model=self.llm,
-            tools=self.tools,
+        """Initialize SearchAgent with fast model and search tools."""
+        super().__init__(
+            model_name="gpt-4o-mini",
+            temperature=0.3,  # Lower for consistent searches
+            timeout=15,  # Fast timeout
+            settings=settings,
         )
 
-    async def run(
-        self,
-        query: str,
-        language: str = "en",
-        context: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+    def get_tools(self) -> List[BaseTool]:
+        """Return search-specific tools."""
+        return get_search_tools()
+
+    def get_system_prompt(self, context: Dict[str, Any], language: str) -> str:
+        """Return search-optimized system prompt."""
+        return get_search_agent_prompt(context, language)
+
+    def should_force_tool(self, query: str) -> bool:
         """
-        Execute search agent.
+        SearchAgent almost always needs to use google_places_tool.
         
-        Args:
-            query: User's search query
-            language: Response language
-            context: Additional context (location, session_id, etc.)
-            
-        Returns:
-            Dict with response_text, places, and metadata
+        Force tool usage for any query mentioning:
+        - Search actions (busca, encuentra, search, find)
+        - Places (restaurante, bar, lugar, place)
+        - Locations (en, in, cerca, near)
         """
-        context = context or {}
-        
-        self.logger.info(
-            "search-agent-starting",
-            query=query,
-            language=language,
-        )
-        
-        # Get specialized search prompt
-        system_prompt = get_search_agent_prompt(context, language)
-        
-        # Prepare messages
-        messages = [SystemMessage(content=system_prompt)]
-        
-        # ✅ Inject conversation history if available
-        history_messages = context.get("history_messages", [])
-        if history_messages:
-            messages.extend(history_messages)
-        else:
-            # Fallback string injection
-            conversation_history = context.get("conversation_history", "")
-            if conversation_history:
-                messages[0].content += f"\n\n## Previous Conversation:\n{conversation_history}"
-        
-        # 🔴 CRITICAL FIX: Force tool usage for search queries
         query_lower = query.lower()
-        requires_search = any([
-            "busca" in query_lower,
-            "encuentra" in query_lower,
-            "muestra" in query_lower,
-            "search" in query_lower,
-            "find" in query_lower,
-            "show" in query_lower,
-            "dame" in query_lower,
-            "give me" in query_lower,
-            # Place types
-            "restaurante" in query_lower,
-            "bar" in query_lower,
-            "cafe" in query_lower,
-            "club" in query_lower,
-            "lugar" in query_lower,
-            "sitio" in query_lower,
-            "place" in query_lower,
-        ])
         
-        # Add instruction to FORCE tool usage
-        if requires_search:
-            messages.append(HumanMessage(content=f"{query}\n\n🔴 MANDATORY: You MUST call google_places_tool to search for places. DO NOT respond without searching first."))
-        else:
-            messages.append(HumanMessage(content=query))
+        # Action words that require search
+        search_actions = [
+            "busca", "encuentra", "muestra", "dame", "dime",
+            "search", "find", "show", "give me", "tell me",
+            "quiero", "necesito", "buscando",
+            "looking for", "need", "want",
+        ]
         
-        try:
-            # Execute agent
-            result = await self.agent_executor.ainvoke(
-                {"messages": messages}
-            )
-            
-            # Extract response
-            final_message = result["messages"][-1]
-            raw_response_text = final_message.content if hasattr(final_message, 'content') else str(final_message)
-            
-            # Extract only Final Answer (remove Thought/Action/Observation markers)
-            final_answer_only = extract_final_answer(raw_response_text)
-            
-            # Clean response text (remove URLs, etc.)
-            response_text = clean_response_text(final_answer_only)
-            
-            # Extract places from tool results
-            places = extract_places_from_messages(result["messages"])
-            
-            # Save places to DB (upsert)
-            if places:
-                try:
-                    places = await save_places_to_db(places, self.settings)
-                    self.logger.info("places-saved-to-db", count=len(places))
-                except Exception as exc:
-                    self.logger.error("failed-to-save-places", error=str(exc))
-                    # Continue with original places if save fails
-            
-            # Extract metadata
-            tool_calls = len([m for m in result["messages"] if hasattr(m, 'tool_calls') and m.tool_calls])
-            reasoning_steps = len(result["messages"])
-            
-            self.logger.info(
-                "search-agent-completed",
-                tool_calls=tool_calls,
-                reasoning_steps=reasoning_steps,
-                places_found=len(places),
-            )
-            
-            return {
-                "response_text": response_text,
-                "places": places,
-                "tool_calls": tool_calls,
-                "reasoning_steps": reasoning_steps,
-                "agent_type": "search",
-                "model_used": "gpt-4o-mini",
-            }
-            
-        except Exception as exc:
-            self.logger.error(
-                "search-agent-failed",
-                error=str(exc),
-                query=query,
-            )
-            raise
+        # Place type indicators
+        place_types = [
+            "restaurante", "restaurant", "bar", "cafe", "café",
+            "club", "discoteca", "pub", "lugar", "sitio",
+            "place", "spot", "hotel", "museo", "museum",
+            "tienda", "shop", "store", "parque", "park",
+        ]
+        
+        # Location indicators
+        location_words = [
+            "en ", "cerca", "near", "around", "in ",
+            "por ", "zone", "zona", "área", "area",
+        ]
+        
+        has_action = any(action in query_lower for action in search_actions)
+        has_place = any(place in query_lower for place in place_types)
+        has_location = any(loc in query_lower for loc in location_words)
+        
+        # Force tool if has search action, or has place type + location
+        return has_action or (has_place and has_location) or has_place
 
+    def get_primary_tool_name(self) -> str:
+        """SearchAgent primarily uses google_places_tool."""
+        return "google_places_tool"

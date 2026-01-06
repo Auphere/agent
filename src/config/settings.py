@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # Observability
     enable_tracing: bool = True
     trace_level: str = "debug"
+    
+    # LangSmith Tracing (optional but recommended for production)
+    langsmith_api_key: Optional[str] = None
+    langsmith_project: str = "auphere-agent"
+    langsmith_tracing_enabled: bool = False  # Set to True when API key is configured
 
     # API configuration
     allowed_origins: str = ""  # Comma-separated list of allowed origins

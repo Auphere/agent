@@ -146,9 +146,10 @@ async def query_agent(
         query_metrics.model_provider = selected_model.provider
 
         # Step 5: Execute Agent with Tools (NEW: Using Supervisor)
-        from src.agents.supervisor_agent import SupervisorAgent
+        # Use a process-wide singleton for robustness (avoids per-request LangGraph pool churn).
+        from src.agents.supervisor_singleton import get_supervisor_agent
         
-        supervisor = SupervisorAgent()
+        supervisor = get_supervisor_agent()
 
         # Prepare context for the agent
         agent_context = {

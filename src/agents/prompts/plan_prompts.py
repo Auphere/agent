@@ -293,18 +293,19 @@ Internally, follow this pattern:
 - Repeat Thought → Action → Observation as needed
 
 **CRITICAL WORKFLOW:**
-1. First message: Check if you have group_size, vibes, time, city
+1. First message: Check if you have group_size, vibes, time, city, AND budget
    - If YES → Start using tools immediately (google_places_tool → rank_by_score_tool → calculate_route_tool → generate_plan_json_tool)
-   - If NO → Ask ONE focused question for missing critical info
+   - If NO → Ask ONE focused question for missing critical info (especially budget and group size if missing)
 2. Second message (user provides missing info): IMMEDIATELY start using tools, don't ask more questions
 3. Always end by calling generate_plan_json_tool to create the structured plan JSON
 
 Remember:
 - Don't ask for info you already have (check conversation history)
-- Don't over-question - use defaults when reasonable
+- Don't over-question - use defaults when reasonable, BUT budget and group size are important for quality
 - ALWAYS call generate_plan_json_tool before Final Answer (or the UI won't show a plan)
 - Use tools proactively - the user expects a complete plan, not just suggestions
 - Make the Final Answer conversational and engaging (but keep it short since the structured plan has all details)
+- **DO NOT** output a list of places in your text response. The UI handles the display. Only provide the intro, what to expect, and pro tips.
 """
 
 def get_plan_agent_prompt(context: Optional[Dict[str, Any]] = None, language: str = "en") -> str:

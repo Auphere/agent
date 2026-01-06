@@ -131,10 +131,125 @@ async def stream_agent_response(
         yield f"event: status\ndata: {json.dumps({'content': f'🤖 Usando modelo: {selected_model.name}'})}\n\n"
         await asyncio.sleep(0.1)
         
-        # Step 6: Execute agent
-        from src.agents.supervisor_agent import SupervisorAgent
+        # Step 5.5: Extract plan parameters if PLAN intent (BEFORE execution)
+        plan_params = {}
+        if intent_result.intention.value == "PLAN":
+            yield f"event: status\ndata: {json.dumps({'content': '🧩 Extrayendo parámetros del plan...'})}\n\n"
+            await asyncio.sleep(0.1)
+            
+            from src.agents.utils.structured_parameter_extractor import StructuredParameterExtractor
+            
+            try:
+                extractor = StructuredParameterExtractor()
+                
+                # Load previous parameters from memory if available
+                previous_params = {}
+                conversation_history = []
+                
+                if memory_context and memory_context.get("recent_turns"):
+                    logger.debug(
+                        "processing-recent-turns",
+                        turn_count=len(memory_context["recent_turns"]),
+                        turn_type=type(memory_context["recent_turns"][0]).__name__ if memory_context["recent_turns"] else None
+                    )
+                    
+                    for turn in memory_context["recent_turns"]:
+                        # Extract conversation history
+                        try:
+                            # Try as object with attributes
+                            if hasattr(turn, 'user_query') and hasattr(turn, 'agent_response'):
+                                conversation_history.append({
+                                    "user_query": turn.user_query,
+                                    "agent_response": turn.agent_response,
+                                })
+                                
+                                # Get previous plan_params from last turn
+                                if not previous_params and hasattr(turn, 'extra_metadata') and turn.extra_metadata:
+                                    previous_params = turn.extra_metadata.get("plan_params", {})
+                                    if previous_params:
+                                        logger.debug("loaded-previous-params", params=previous_params)
+                            # Try as dictionary
+                            elif isinstance(turn, dict):
+                                conversation_history.append({
+                                    "user_query": turn.get("user_query", ""),
+                                    "agent_response": turn.get("agent_response", ""),
+                                })
+                                
+                                # Get previous plan_params from last turn
+                                if not previous_params and "extra_metadata" in turn and turn["extra_metadata"]:
+                                    previous_params = turn["extra_metadata"].get("plan_params", {})
+                                    if previous_params:
+                                        logger.debug("loaded-previous-params", params=previous_params)
+                        except Exception as e:
+                            logger.warning("failed-to-process-turn", error=str(e))
+                            continue
+                
+                logger.debug(
+                    "extraction-context-built",
+                    conversation_history_count=len(conversation_history),
+                    previous_params_count=len(previous_params)
+                )
+                
+                # Extract parameters from conversation
+                extracted_params = await extractor.extract_from_conversation(
+                    current_query=request.query,
+                    conversation_history=conversation_history,
+                )
+                
+                logger.debug(
+                    "extraction-results",
+                    extracted=extracted_params.model_dump(exclude_none=True),
+                    previous=previous_params
+                )
+                
+                # Merge with previous parameters
+                # IMPORTANT: Start with previous params to ensure we don't lose information
+                plan_params = previous_params.copy() if previous_params else {}
+                
+                # Add/update with newly extracted params (only non-None values)
+                new_dict = extracted_params.model_dump(exclude_none=True)
+                for field, value in new_dict.items():
+                    if value is not None and value != [] and value != "":
+                        # For lists, merge uniquely
+                        if isinstance(value, list) and field in plan_params and isinstance(plan_params[field], list):
+                            plan_params[field] = list(set(plan_params[field] + value))
+                        else:
+                            # Add/override scalar values
+                            plan_params[field] = value
+                
+                logger.debug("merged-params", result=plan_params)
+                
+                # Special handling: if budget_total mentioned, calculate per person
+                # Example: "presupuesto total de 30 euros" with 3 people → 10 per person
+                if "budget_total" in request.query.lower() or "presupuesto total" in request.query.lower():
+                    import re
+                    # Try to extract total budget
+                    budget_match = re.search(r'(\d+)\s*euros?\s*(?:total|en total)?', request.query.lower())
+                    if budget_match and plan_params.get("num_people"):
+                        total_budget = float(budget_match.group(1))
+                        plan_params["budget_per_person"] = total_budget / plan_params["num_people"]
+                        logger.info(
+                            "budget-calculated-from-total",
+                            total=total_budget,
+                            num_people=plan_params["num_people"],
+                            per_person=plan_params["budget_per_person"]
+                        )
+                
+                logger.info("plan-params-extracted-pre-execution", params=plan_params)
+                
+                # Show what we extracted
+                extracted_count = len([v for v in plan_params.values() if v is not None and v != [] and v != ""])
+                yield f"event: thought\ndata: {json.dumps({'content': f'💭 **Extracción**: Detecté {extracted_count} parámetros de tu consulta'})}\n\n"
+                
+            except Exception as e:
+                logger.error("plan-params-extraction-failed-pre-execution", error=str(e))
+                # Continue with empty params rather than failing
+                plan_params = {}
         
-        supervisor = SupervisorAgent()
+        # Step 6: Execute agent
+        from src.agents.supervisor_singleton import get_supervisor_agent
+        
+        supervisor = get_supervisor_agent()
         
         # Better status messages based on intent
         intent_name = intent_result.intention.value
@@ -192,9 +307,10 @@ async def stream_agent_response(
                 context=agent_context,
             )
         
-        # Execute agent
+        # Build agent context with all necessary information
         # ✅ FIX: Merge memory_context directly into context (not nested)
         # ✅ FIX: Serialize datetime objects to strings
+        # ✅ CRITICAL: plan_params and session_id at top level for LangGraph
         validated_context_dict = validated_context.dict()
         # Convert any datetime objects to ISO format strings
         for key, value in validated_context_dict.items():
@@ -203,11 +319,14 @@ async def stream_agent_response(
         
         agent_context = {
             "user_id": str(user_id),
-            "session_id": str(session_uuid),
+            "session_id": str(session_uuid),  # ✅ CRITICAL: Used as thread_id in LangGraph
+            "plan_params": plan_params,  # ✅ CRITICAL: Passed to LangGraph state
             "validated_context": validated_context_dict,
             **memory_context,  # ← Unpack memory_context directly
         }
         
+        # Execute agent with full context
+        # session_id and plan_params will be extracted by specialized agents
         agent_result = await supervisor.run(
             query=request.query,
             intent=intent_result.intention,
@@ -266,15 +385,19 @@ async def stream_agent_response(
         raw_plan_meta = agent_result.get("plan")
         extra_metadata = {"plan": normalize_plan(raw_plan_meta) if raw_plan_meta else None}
         
+        # ✅ IMPROVED: Save plan_params (extracted pre-execution or returned by agent)
         if intent_result.intention.value == "PLAN":
-            from src.agents.context_builder import PlanContextExtractor
-            # Extract plan parameters from query for future reference
-            extracted_params = PlanContextExtractor.extract_from_query(
-                request.query,
-                request.language or "es"
-            )
-            if extracted_params:
-                extra_metadata["plan_params"] = extracted_params
+            # Priority 1: Use plan_params from agent result (if agent updated them)
+            if "plan_params" in agent_result and agent_result["plan_params"]:
+                extra_metadata["plan_params"] = agent_result["plan_params"]
+                logger.info("plan-params-from-agent-result", params=agent_result["plan_params"])
+            # Priority 2: Use plan_params extracted pre-execution
+            elif plan_params:
+                extra_metadata["plan_params"] = plan_params
+                logger.info("plan-params-from-pre-extraction", params=plan_params)
+            else:
+                extra_metadata["plan_params"] = None
+                logger.warning("plan-params-not-available")
         
         await conversation_repo.save_turn(
             user_id=user_id,

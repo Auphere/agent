@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from src.agents.react_agent import ReactAgent  # Fallback
-from src.agents.specialized import PlanAgent, RecommendAgent, SearchAgent
+from src.agents.specialized import RecommendAgent, SearchAgent
 from src.agents.specialized.plan_and_execute_agent import PlanAndExecuteAgent
 from src.classifiers.models import IntentType
 from src.config.settings import Settings, get_settings
@@ -18,7 +18,7 @@ class SupervisorAgent:
     
     Routing Logic:
     - SEARCH → SearchAgent (fast, focused)
-    - PLAN → PlanAgent (complex, multi-tool)
+    - PLAN → PlanAndExecuteAgent (advanced multi-step planning)
     - RECOMMEND → RecommendAgent (scoring-focused)
     - CHITCHAT → Simple response (no tools)
     - ERROR/UNKNOWN → ReactAgent (fallback)
@@ -36,8 +36,7 @@ class SupervisorAgent:
         
         # Lazy-initialized agents (only created when needed)
         self._search_agent = None
-        self._plan_agent = None
-        self._plan_and_execute_agent = None  # NEW: Advanced planning agent
+        self._plan_and_execute_agent = None
         self._recommend_agent = None
         self._fallback_agent = None
         
@@ -48,12 +47,6 @@ class SupervisorAgent:
         if self._search_agent is None:
             self._search_agent = SearchAgent(settings=self.settings)
         return self._search_agent
-    
-    def _get_plan_agent(self) -> PlanAgent:
-        """Lazy initialization of PlanAgent (legacy)."""
-        if self._plan_agent is None:
-            self._plan_agent = PlanAgent(settings=self.settings)
-        return self._plan_agent
     
     def _get_plan_and_execute_agent(self) -> PlanAndExecuteAgent:
         """Lazy initialization of Plan-and-Execute Agent (new, advanced)."""
@@ -113,7 +106,18 @@ class SupervisorAgent:
             elif intent == IntentType.PLAN:
                 # Use new Plan-and-Execute agent for better quality
                 self.logger.info("routing-to-plan-and-execute-agent")
-                result = await self._get_plan_and_execute_agent().run(query, language, context)
+                
+                # ✅ Extract session_id and plan_params from context
+                session_id = context.get("session_id")
+                plan_params = context.get("plan_params", {})
+                
+                result = await self._get_plan_and_execute_agent().run(
+                    query=query,
+                    language=language,
+                    session_id=session_id,  # ✅ CRITICAL for state persistence
+                    plan_params=plan_params,  # ✅ Managed by LangGraph reducer
+                    context=context
+                )
                 
             elif intent == IntentType.RECOMMEND:
                 self.logger.info("routing-to-recommend-agent")
@@ -153,13 +157,13 @@ class SupervisorAgent:
             
             # Intelligent fallback based on original intent
             try:
-                # If PlanAgent failed, try RecommendAgent (simpler, more likely to succeed)
+                # If PlanAndExecuteAgent failed, try RecommendAgent (simpler)
                 if intent == IntentType.PLAN:
-                    self.logger.info("plan-agent-failed-trying-recommend-agent")
+                    self.logger.info("plan-and-execute-agent-failed-trying-recommend-agent")
                     result = await self._get_recommend_agent().run(query, language, context)
                     result["routed_to"] = "recommend_fallback_from_plan"
                     result["intent"] = intent.value
-                    result["fallback_reason"] = "PlanAgent timeout/error"
+                    result["fallback_reason"] = "PlanAndExecuteAgent timeout/error"
                     return result
                 
                 # For other failures, use general fallback
@@ -174,4 +178,12 @@ class SupervisorAgent:
                     error=str(fallback_exc)
                 )
                 raise
+
+    async def cleanup(self) -> None:
+        """Cleanup resources for any initialized specialized agents."""
+        # PlanAndExecuteAgent maintains a dedicated psycopg async pool for checkpointing.
+        if self._plan_and_execute_agent is not None:
+            cleanup = getattr(self._plan_and_execute_agent, "cleanup", None)
+            if callable(cleanup):
+                await cleanup()
 

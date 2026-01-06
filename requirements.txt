@@ -10,7 +10,8 @@ langchain-community==0.3.15
 langgraph==0.2.61
 langchain-openai==0.3.1
 langchain-anthropic==0.3.4
-langgraph-checkpoint==2.0.26  # For state persistence
+langgraph-checkpoint==2.1.2  # For state persistence (updated for compatibility)
+langgraph-checkpoint-postgres==2.0.25  # For PostgreSQL checkpoint storage
 
 # API
 fastapi==0.115.6
@@ -22,6 +23,8 @@ requests==2.32.3
 sqlalchemy==2.0.36
 asyncpg==0.30.0
 psycopg2-binary==2.9.10
+psycopg[binary]==3.2.1  # For LangGraph AsyncConnectionPool
+psycopg-pool==3.2.4  # For LangGraph checkpoint connection pooling
 greenlet==3.1.1
 
 # Cache

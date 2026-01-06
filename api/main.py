@@ -20,9 +20,14 @@ from src.config.settings import get_settings
 from src.database import close_db, init_db
 from src.utils.cache_manager import get_cache_manager
 from src.utils.logger import get_logger
+from src.utils.tracing import configure_langsmith
+from src.agents.supervisor_singleton import get_supervisor_agent
 
 settings = get_settings()
 logger = get_logger("main")
+
+# Configure LangSmith tracing BEFORE creating any LLM instances
+configure_langsmith(settings)
 
 
 @asynccontextmanager
@@ -63,6 +68,14 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Shutting down Auphere Agent")
 
     try:
+        # Cleanup LangGraph resources (psycopg pool workers, etc.)
+        try:
+            supervisor = get_supervisor_agent()
+            await supervisor.cleanup()
+            logger.info("✅ Supervisor resources cleaned up")
+        except Exception as exc:
+            logger.warning(f"⚠️ Supervisor cleanup error: {exc}")
+
         # Close database
         await close_db()
         logger.info("✅ Database connections closed")

@@ -50,8 +50,15 @@ def _normalize_new_plan_format(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
     """
     plan_id = raw_plan.get("planId") or raw_plan.get("id") or raw_plan.get("_id")
 
-    # Map top-level fields
-    name = raw_plan.get("title") or raw_plan.get("name") or "Untitled Plan"
+    # Map top-level fields - preserve both title and name for frontend compatibility
+    title = raw_plan.get("title") or raw_plan.get("name") or "Plan sin título"
+    name = title  # Keep consistent
+    
+    # Clean up TBD in title
+    if "TBD" in title:
+        title = title.replace(" en TBD", "").replace(" TBD", "").strip()
+        name = title
+    
     description = raw_plan.get("description", "")
     category = raw_plan.get("category")
     vibes = raw_plan.get("vibes", [])
@@ -155,6 +162,7 @@ def _normalize_new_plan_format(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {
         "id": str(plan_id) if plan_id else None,
         "name": name,
+        "title": title,  # Include both for frontend compatibility
         "description": description,
         "category": category,
         "vibes": vibes if isinstance(vibes, list) else [vibes] if vibes else [],

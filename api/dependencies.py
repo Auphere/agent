@@ -6,6 +6,7 @@ from fastapi import Depends
 
 from src.agents.memory import MemoryManager
 from src.classifiers.intent_classifier import IntentClassifier
+from src.classifiers.combined_classifier import CombinedClassifier
 from src.config.settings import Settings, get_settings
 from src.database import (
     ChatRepository,
@@ -32,8 +33,20 @@ def get_context_validator(
 def get_intent_classifier(
     settings: Settings = Depends(get_settings),
 ) -> IntentClassifier:
-    """Get intent classifier instance."""
+    """Get intent classifier instance (legacy)."""
     return IntentClassifier(settings=settings)
+
+
+def get_combined_classifier(
+    settings: Settings = Depends(get_settings),
+) -> CombinedClassifier:
+    """
+    Get combined classifier instance.
+    
+    This classifier does intent classification + parameter extraction
+    in a single LLM call, reducing latency and costs.
+    """
+    return CombinedClassifier(settings=settings)
 
 
 def get_llm_router(
