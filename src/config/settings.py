@@ -69,7 +69,21 @@ class Settings(BaseSettings):
     # LangSmith Tracing (optional but recommended for production)
     langsmith_api_key: Optional[str] = None
     langsmith_project: str = "auphere-agent"
-    langsmith_tracing_enabled: bool = False  # Set to True when API key is configured
+    langsmith_tracing_enabled: bool = True  # ✅ Enabled - requires LANGSMITH_API_KEY
+    
+    # Timeout Configuration (in seconds)
+    # Connection timeout: time to establish connection
+    # Read timeout: time to wait for response
+    llm_connection_timeout: float = 5.0
+    llm_read_timeout_simple: float = 30.0      # For classification, chitchat
+    llm_read_timeout_standard: float = 60.0    # For search, simple recommendations
+    llm_read_timeout_complex: float = 90.0     # For complex recommendations, plans
+    tool_timeout: float = 15.0                 # For external API calls
+    agent_max_execution_time: float = 180.0    # Max total agent execution time
+    
+    # Retry Configuration
+    llm_max_retries: int = 3                   # Max retries for LLM calls
+    tool_max_retries: int = 2                  # Max retries for tool calls
 
     # API configuration
     allowed_origins: str = ""  # Comma-separated list of allowed origins

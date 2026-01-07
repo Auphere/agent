@@ -12,8 +12,10 @@ eliminating the need for a separate synthesizer node.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import operator
+from time import perf_counter
 from typing import Any, Dict, List, Optional, TypedDict, Annotated, Sequence
 from uuid import uuid4
 
@@ -246,29 +248,55 @@ class PlanAndExecuteAgent:
     2. Executes each step using appropriate tools
     3. Synthesizes all information into a comprehensive response
     4. Can replan if needed based on intermediate results
+    
+    Timeout Configuration:
+    - Planner: 60s (needs time to analyze and plan)
+    - Executor: 90s (may call multiple tools)
+    - Synthesizer: 60s (final response generation)
+    
+    Retry Configuration:
+    - All LLMs: 3 retries with exponential backoff
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.logger = get_logger("plan_and_execute_agent", settings=self.settings)
 
-        # LLMs for different stages
+        # LLMs for different stages with improved timeout configuration
+        # Planner: needs time for complex analysis
         self.planner_llm = ChatOpenAI(
             model="gpt-4o",
             temperature=0.3,
             api_key=self.settings.openai_api_key,
+            timeout=(
+                self.settings.llm_connection_timeout,
+                self.settings.llm_read_timeout_standard  # 60s
+            ),
+            max_retries=self.settings.llm_max_retries,
         )
 
+        # Executor: may need to process tool results
         self.executor_llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0.5,
             api_key=self.settings.openai_api_key,
+            timeout=(
+                self.settings.llm_connection_timeout,
+                self.settings.llm_read_timeout_complex  # 90s
+            ),
+            max_retries=self.settings.llm_max_retries,
         )
 
+        # Synthesizer: final response generation
         self.synthesizer_llm = ChatOpenAI(
             model="gpt-4o",
             temperature=0.7,
             api_key=self.settings.openai_api_key,
+            timeout=(
+                self.settings.llm_connection_timeout,
+                self.settings.llm_read_timeout_standard  # 60s
+            ),
+            max_retries=self.settings.llm_max_retries,
         )
 
         # Get tools

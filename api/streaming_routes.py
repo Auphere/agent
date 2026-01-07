@@ -146,40 +146,54 @@ async def stream_agent_response(
                 previous_params = {}
                 conversation_history = []
                 
-                if memory_context and memory_context.get("recent_turns"):
+                # ✅ FIX: Process recent_turns to extract plan_params from ALL turns
+                recent_turns = memory_context.get("recent_turns", [])
+                
+                if recent_turns:
                     logger.debug(
                         "processing-recent-turns",
-                        turn_count=len(memory_context["recent_turns"]),
-                        turn_type=type(memory_context["recent_turns"][0]).__name__ if memory_context["recent_turns"] else None
+                        turn_count=len(recent_turns),
+                        turn_type=type(recent_turns[0]).__name__ if recent_turns else None
                     )
                     
-                    for turn in memory_context["recent_turns"]:
-                        # Extract conversation history
+                    # Process turns to build conversation history AND find previous plan_params
+                    # Turns are in reverse order (most recent first), so we iterate to find the most recent plan_params
+                    for turn in recent_turns:
                         try:
-                            # Try as object with attributes
-                            if hasattr(turn, 'user_query') and hasattr(turn, 'agent_response'):
-                                conversation_history.append({
-                                    "user_query": turn.user_query,
-                                    "agent_response": turn.agent_response,
-                                })
-                                
-                                # Get previous plan_params from last turn
-                                if not previous_params and hasattr(turn, 'extra_metadata') and turn.extra_metadata:
-                                    previous_params = turn.extra_metadata.get("plan_params", {})
-                                    if previous_params:
-                                        logger.debug("loaded-previous-params", params=previous_params)
+                            # Extract user_query and agent_response
+                            user_query = None
+                            agent_response = None
+                            extra_metadata = None
+                            
+                            # Try as object with attributes (ConversationTurn model)
+                            if hasattr(turn, 'user_query'):
+                                user_query = turn.user_query
+                                agent_response = getattr(turn, 'agent_response', '')
+                                extra_metadata = getattr(turn, 'extra_metadata', None)
                             # Try as dictionary
                             elif isinstance(turn, dict):
+                                user_query = turn.get("user_query", "")
+                                agent_response = turn.get("agent_response", "")
+                                extra_metadata = turn.get("extra_metadata")
+                            
+                            if user_query:
                                 conversation_history.append({
-                                    "user_query": turn.get("user_query", ""),
-                                    "agent_response": turn.get("agent_response", ""),
+                                    "user_query": user_query,
+                                    "agent_response": agent_response or "",
                                 })
-                                
-                                # Get previous plan_params from last turn
-                                if not previous_params and "extra_metadata" in turn and turn["extra_metadata"]:
-                                    previous_params = turn["extra_metadata"].get("plan_params", {})
-                                    if previous_params:
-                                        logger.debug("loaded-previous-params", params=previous_params)
+                            
+                            # ✅ FIX: Extract plan_params from the MOST RECENT turn that has them
+                            # This ensures we accumulate parameters across the conversation
+                            if not previous_params and extra_metadata:
+                                turn_plan_params = extra_metadata.get("plan_params")
+                                if turn_plan_params and isinstance(turn_plan_params, dict) and len(turn_plan_params) > 0:
+                                    previous_params = turn_plan_params.copy()
+                                    logger.info(
+                                        "loaded-previous-plan-params",
+                                        params=previous_params,
+                                        from_turn=user_query[:50] if user_query else "unknown"
+                                    )
+                                    
                         except Exception as e:
                             logger.warning("failed-to-process-turn", error=str(e))
                             continue
@@ -187,7 +201,8 @@ async def stream_agent_response(
                 logger.debug(
                     "extraction-context-built",
                     conversation_history_count=len(conversation_history),
-                    previous_params_count=len(previous_params)
+                    previous_params_count=len(previous_params),
+                    previous_params_keys=list(previous_params.keys()) if previous_params else []
                 )
                 
                 # Extract parameters from conversation
@@ -219,21 +234,40 @@ async def stream_agent_response(
                 
                 logger.debug("merged-params", result=plan_params)
                 
-                # Special handling: if budget_total mentioned, calculate per person
-                # Example: "presupuesto total de 30 euros" with 3 people → 10 per person
-                if "budget_total" in request.query.lower() or "presupuesto total" in request.query.lower():
+                # Special handling: calculate budget_per_person from total budget if possible
+                # This handles cases like:
+                # - "presupuesto total de 100 euros"
+                # - "100 euros en total"
+                # - "tenemos un presupuesto de 100 euros"
+                # - "100€ aproximadamente"
+                query_lower = request.query.lower()
+                
+                # Check if budget_per_person is not already set and we have num_people
+                if not plan_params.get("budget_per_person") and plan_params.get("num_people"):
                     import re
-                    # Try to extract total budget
-                    budget_match = re.search(r'(\d+)\s*euros?\s*(?:total|en total)?', request.query.lower())
-                    if budget_match and plan_params.get("num_people"):
-                        total_budget = float(budget_match.group(1))
-                        plan_params["budget_per_person"] = total_budget / plan_params["num_people"]
-                        logger.info(
-                            "budget-calculated-from-total",
-                            total=total_budget,
-                            num_people=plan_params["num_people"],
-                            per_person=plan_params["budget_per_person"]
-                        )
+                    
+                    # Multiple patterns to capture budget amounts
+                    budget_patterns = [
+                        r'presupuesto\s*(?:total\s*)?(?:de\s*)?(\d+)\s*€?(?:\s*euros?)?',
+                        r'(\d+)\s*€?\s*(?:euros?)?\s*(?:en\s*)?total',
+                        r'(\d+)\s*€?\s*(?:euros?)?\s*(?:aproximadamente|aprox)?',
+                        r'tenemos\s*(?:un\s*)?(?:presupuesto\s*de\s*)?(\d+)\s*€?\s*(?:euros?)?',
+                        r'(\d+)\s*€\s*(?:de\s*presupuesto)?',
+                    ]
+                    
+                    for pattern in budget_patterns:
+                        budget_match = re.search(pattern, query_lower)
+                        if budget_match:
+                            total_budget = float(budget_match.group(1))
+                            plan_params["budget_per_person"] = round(total_budget / plan_params["num_people"], 2)
+                            logger.info(
+                                "budget-calculated-from-total",
+                                total=total_budget,
+                                num_people=plan_params["num_people"],
+                                per_person=plan_params["budget_per_person"],
+                                matched_pattern=pattern
+                            )
+                            break
                 
                 logger.info("plan-params-extracted-pre-execution", params=plan_params)
                 

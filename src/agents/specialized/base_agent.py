@@ -16,9 +16,11 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import operator
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, TypedDict, Annotated, Sequence
+from time import perf_counter
+from typing import Any, Dict, List, Optional, TypedDict, Annotated, Sequence, Tuple, Union
 
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
@@ -31,6 +33,7 @@ from src.agents.utils.response_parser import extract_final_answer
 from src.config.settings import Settings, get_settings
 from src.utils.logger import get_logger
 from src.utils.cache_manager import get_cache_manager
+from src.utils.metrics import get_metrics_collector, timed
 
 
 # ============================================================================
@@ -72,24 +75,30 @@ class BaseSpecializedAgent(ABC):
     Abstract base class for specialized agents.
     
     Provides:
-    - Common LLM initialization
+    - Common LLM initialization with configurable timeouts
     - Tool binding with tool_choice support
     - Consistent logging
     - Cache integration
     - Place extraction and saving
     - Response cleaning
+    - Retry logic for transient failures
     
     Subclasses must implement:
     - get_tools(): Return list of tools for this agent
     - get_system_prompt(): Return system prompt for this agent
     - agent_type: Property returning agent type name
+    
+    Timeout Configuration:
+    - timeout can be int/float (single value) or tuple (connect, read)
+    - Tuple format is recommended: (5.0, 60.0) = 5s connect, 60s read
     """
     
     def __init__(
         self,
         model_name: str = "gpt-4o-mini",
         temperature: float = 0.5,
-        timeout: int = 30,
+        timeout: Union[float, Tuple[float, float]] = None,
+        max_retries: int = None,
         settings: Settings | None = None,
     ) -> None:
         """
@@ -98,20 +107,38 @@ class BaseSpecializedAgent(ABC):
         Args:
             model_name: OpenAI model to use
             temperature: LLM temperature
-            timeout: Request timeout in seconds
+            timeout: Request timeout - can be:
+                     - float: single timeout for all operations
+                     - tuple: (connection_timeout, read_timeout)
+                     - None: use settings defaults
+            max_retries: Max retry attempts (None = use settings default)
             settings: Application settings
         """
         self.settings = settings or get_settings()
         self.logger = get_logger(f"{self.agent_type}-agent", settings=self.settings)
         
-        # Initialize LLM
+        # Configure timeout from settings if not provided
+        if timeout is None:
+            timeout = (
+                self.settings.llm_connection_timeout,
+                self.settings.llm_read_timeout_standard
+            )
+        
+        # Configure retries from settings if not provided
+        if max_retries is None:
+            max_retries = self.settings.llm_max_retries
+        
+        # Store timeout config for logging/debugging
+        self._timeout_config = timeout
+        self._max_retries = max_retries
+        
+        # Initialize LLM with improved configuration
         self.llm = ChatOpenAI(
             model=model_name,
             temperature=temperature,
             api_key=self.settings.openai_api_key,
-            timeout=timeout,
-            max_retries=1,
-            request_timeout=timeout,
+            timeout=timeout,  # Now supports tuple (connect, read)
+            max_retries=max_retries,
         )
         
         # Get tools for this agent type
@@ -124,6 +151,8 @@ class BaseSpecializedAgent(ABC):
             f"{self.agent_type}-agent-initialized",
             model=model_name,
             tools_count=len(self.tools),
+            timeout=str(timeout),
+            max_retries=max_retries,
         )
     
     @property
@@ -202,7 +231,7 @@ class BaseSpecializedAgent(ABC):
         context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
-        Execute the agent.
+        Execute the agent with comprehensive error handling and metrics.
         
         Args:
             query: User query
@@ -213,11 +242,21 @@ class BaseSpecializedAgent(ABC):
             Dict with response_text, places, and metadata
         """
         context = context or {}
+        start_time = perf_counter()
+        
+        # Initialize metrics
+        metrics_collector = get_metrics_collector()
+        agent_metrics = metrics_collector.start_agent_execution(
+            agent_type=self.agent_type,
+            query=query,
+        )
+        agent_metrics.model_used = self.llm.model_name
         
         self.logger.info(
             f"{self.agent_type}-agent-starting",
             query=query,
             language=language,
+            timeout=str(self._timeout_config),
         )
         
         # Build messages
@@ -259,8 +298,12 @@ class BaseSpecializedAgent(ABC):
             else:
                 llm_for_call = self.llm_with_tools
             
-            # First LLM call
+            # First LLM call with timing
+            llm_start = perf_counter()
             response = await llm_for_call.ainvoke(messages)
+            llm_duration = perf_counter() - llm_start
+            self.logger.debug(f"llm-call-completed", duration_ms=int(llm_duration * 1000))
+            
             messages.append(response)
             
             # Process tool calls if any
@@ -279,7 +322,20 @@ class BaseSpecializedAgent(ABC):
                     tool = next((t for t in self.tools if t.name == tool_name), None)
                     if tool:
                         try:
-                            tool_result = await tool.ainvoke(tool_args)
+                            tool_start = perf_counter()
+                            
+                            # Execute tool with timeout protection
+                            tool_result = await asyncio.wait_for(
+                                tool.ainvoke(tool_args),
+                                timeout=self.settings.tool_timeout
+                            )
+                            
+                            tool_duration = perf_counter() - tool_start
+                            self.logger.debug(
+                                "tool-executed",
+                                tool=tool_name,
+                                duration_ms=int(tool_duration * 1000),
+                            )
                             
                             # Add tool message
                             from langchain_core.messages import ToolMessage
@@ -287,8 +343,19 @@ class BaseSpecializedAgent(ABC):
                                 content=str(tool_result) if not isinstance(tool_result, str) else tool_result,
                                 tool_call_id=tool_call["id"],
                             ))
+                        except asyncio.TimeoutError:
+                            self.logger.warning(
+                                "tool-timeout",
+                                tool=tool_name,
+                                timeout=self.settings.tool_timeout,
+                            )
+                            from langchain_core.messages import ToolMessage
+                            messages.append(ToolMessage(
+                                content=f"Error: Tool {tool_name} timed out after {self.settings.tool_timeout}s",
+                                tool_call_id=tool_call["id"],
+                            ))
                         except Exception as e:
-                            self.logger.error(f"tool-execution-failed", tool=tool_name, error=str(e))
+                            self.logger.error("tool-execution-failed", tool=tool_name, error=str(e))
                             from langchain_core.messages import ToolMessage
                             messages.append(ToolMessage(
                                 content=f"Error: {str(e)}",
@@ -311,14 +378,24 @@ class BaseSpecializedAgent(ABC):
             if places:
                 try:
                     places = await save_places_to_db(places, self.settings)
-                    self.logger.info("places-saved", count=len(places))
+                    self.logger.info("places-saved-to-db", count=len(places))
                 except Exception as exc:
                     self.logger.error("failed-to-save-places", error=str(exc))
+            
+            # Calculate total duration
+            total_duration = perf_counter() - start_time
+            
+            # Update metrics
+            agent_metrics.tool_calls = tool_call_count
+            agent_metrics.places_found = len(places)
+            metrics_collector.end_agent_execution(agent_metrics, success=True)
             
             self.logger.info(
                 f"{self.agent_type}-agent-completed",
                 tool_calls=tool_call_count,
                 places_found=len(places),
+                duration_ms=int(total_duration * 1000),
+                has_response=bool(response_text),
             )
             
             return {
@@ -328,13 +405,32 @@ class BaseSpecializedAgent(ABC):
                 "reasoning_steps": len(messages),
                 "agent_type": self.agent_type,
                 "model_used": self.llm.model_name,
+                "duration_ms": int(total_duration * 1000),
             }
             
+        except asyncio.TimeoutError as exc:
+            duration = perf_counter() - start_time
+            metrics_collector.end_agent_execution(agent_metrics, success=False, error=exc)
+            
+            self.logger.error(
+                f"{self.agent_type}-agent-timeout",
+                error="Request timed out",
+                duration_ms=int(duration * 1000),
+                timeout_config=str(self._timeout_config),
+                query=query[:100],  # Truncate for logging
+            )
+            raise
+            
         except Exception as exc:
+            duration = perf_counter() - start_time
+            metrics_collector.end_agent_execution(agent_metrics, success=False, error=exc)
+            
             self.logger.error(
                 f"{self.agent_type}-agent-failed",
                 error=str(exc),
-                query=query,
+                error_type=type(exc).__name__,
+                duration_ms=int(duration * 1000),
+                query=query[:100],
             )
             raise
 

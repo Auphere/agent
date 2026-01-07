@@ -8,7 +8,7 @@ from langchain_core.tools import BaseTool
 
 from src.agents.specialized.base_agent import BaseSpecializedAgent
 from src.agents.prompts.search_prompts import get_search_agent_prompt
-from src.config.settings import Settings
+from src.config.settings import Settings, get_settings
 from src.tools.tool_registry import get_search_tools
 
 
@@ -22,6 +22,7 @@ class SearchAgent(BaseSpecializedAgent):
     - Quick, concise responses
     - Minimal reasoning steps
     - Uses bind_tools with tool_choice for reliable tool usage
+    - Timeout: 60s (standard) for fast searches
     
     Best for:
     - "Find X in Y"
@@ -35,11 +36,18 @@ class SearchAgent(BaseSpecializedAgent):
 
     def __init__(self, settings: Settings | None = None) -> None:
         """Initialize SearchAgent with fast model and search tools."""
+        _settings = settings or get_settings()
+        
         super().__init__(
             model_name="gpt-4o-mini",
             temperature=0.3,  # Lower for consistent searches
-            timeout=15,  # Fast timeout
-            settings=settings,
+            # Standard timeout for fast searches
+            timeout=(
+                _settings.llm_connection_timeout,
+                _settings.llm_read_timeout_standard
+            ),
+            max_retries=_settings.llm_max_retries,
+            settings=_settings,
         )
 
     def get_tools(self) -> List[BaseTool]:

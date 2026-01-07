@@ -8,7 +8,7 @@ from langchain_core.tools import BaseTool
 
 from src.agents.specialized.base_agent import BaseSpecializedAgent
 from src.agents.prompts.recommend_prompts import get_recommend_agent_prompt
-from src.config.settings import Settings
+from src.config.settings import Settings, get_settings
 from src.tools.tool_registry import get_recommend_tools
 
 
@@ -21,6 +21,7 @@ class RecommendAgent(BaseSpecializedAgent):
     - Focuses on google_places_tool + rank_by_score_tool
     - Opinionated, helpful responses
     - Uses bind_tools with tool_choice for reliable tool usage
+    - Timeout: 90s read timeout to allow for complex recommendations
     
     Best for:
     - "What's the best X?"
@@ -34,12 +35,26 @@ class RecommendAgent(BaseSpecializedAgent):
         return "recommend"
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """Initialize RecommendAgent with balanced settings."""
+        """
+        Initialize RecommendAgent with optimized settings for recommendations.
+        
+        Uses longer timeout (90s) to accommodate:
+        - Multiple tool calls (Google Places, ranking)
+        - Complex response generation with place context
+        - Potential retries on transient failures
+        """
+        _settings = settings or get_settings()
+        
         super().__init__(
             model_name="gpt-4o-mini",
             temperature=0.5,  # Medium for balanced recommendations
-            timeout=20,  # Slightly longer for recommendations
-            settings=settings,
+            # Use complex timeout: 5s connect, 90s read
+            timeout=(
+                _settings.llm_connection_timeout,
+                _settings.llm_read_timeout_complex
+            ),
+            max_retries=_settings.llm_max_retries,
+            settings=_settings,
         )
 
     def get_tools(self) -> List[BaseTool]:

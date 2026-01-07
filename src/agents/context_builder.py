@@ -172,6 +172,10 @@ class ContextBuilder:
             "history_messages": context.recent_messages,
             "conversation_history": self.build_string_context(context, include_metadata=False),
             
+            # ✅ FIX: Include recent_turns for plan parameter extraction
+            # This allows streaming_routes to access extra_metadata with plan_params
+            "recent_turns": context.recent_turns,
+            
             # Place context
             "previous_places": context.previous_places,
             
