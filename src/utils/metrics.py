@@ -278,16 +278,28 @@ class MetricsCollector:
         
         return metrics
     
-    def get_summary(self) -> Dict[str, Any]:
-        """Get summary statistics for all collected metrics."""
+    def get_summary(self, last_n: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Get summary statistics for all collected metrics.
+        
+        Args:
+            last_n: If provided, compute stats using only the most recent N timing samples
+                    per metric name (useful to avoid unbounded growth and reflect current behavior).
+        """
         summary = {}
         
         for name, values in self._timings.items():
-            if values:
-                summary[f"{name}_count"] = len(values)
-                summary[f"{name}_avg_ms"] = sum(values) / len(values)
-                summary[f"{name}_min_ms"] = min(values)
-                summary[f"{name}_max_ms"] = max(values)
+            if not values:
+                continue
+            
+            sample = values
+            if isinstance(last_n, int) and last_n > 0:
+                sample = values[-last_n:]
+
+            summary[f"{name}_count"] = len(sample)
+            summary[f"{name}_avg_ms"] = sum(sample) / len(sample)
+            summary[f"{name}_min_ms"] = min(sample)
+            summary[f"{name}_max_ms"] = max(sample)
         
         for name, count in self._counters.items():
             summary[name] = count

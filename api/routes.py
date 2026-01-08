@@ -982,8 +982,12 @@ async def health_check(
     except Exception:
         db_status = "error"
 
-    # Get metrics summary
-    metrics_summary = metrics_collector.get_summary(last_n=100)
+    # Get metrics summary (do not let metrics failures break liveness/readiness)
+    try:
+        metrics_summary = metrics_collector.get_summary(last_n=100)
+    except Exception as exc:
+        logger.error("health_metrics_summary_failed", error=str(exc))
+        metrics_summary = {"error": "metrics_summary_failed"}
 
     return HealthResponse(
         status="healthy",
