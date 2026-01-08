@@ -22,6 +22,7 @@ from src.utils.cache_manager import get_cache_manager
 from src.utils.logger import get_logger
 from src.utils.tracing import configure_langsmith
 from src.agents.supervisor_singleton import get_supervisor_agent
+from src.vector.qdrant_store import get_qdrant_store
 
 settings = get_settings()
 logger = get_logger("main")
@@ -55,6 +56,16 @@ async def lifespan(app: FastAPI):
             logger.info("✅ Redis cache connected")
         else:
             logger.info("⚠️ Redis caching disabled")
+
+        # Initialize Vector DB (Qdrant) - optional
+        qdrant = get_qdrant_store(settings=settings)
+        if qdrant.enabled:
+            logger.info("Connecting to Qdrant vector DB...")
+            qdrant.ensure_collections()
+            if qdrant.enabled:
+                logger.info("✅ Qdrant vector DB ready")
+            else:
+                logger.warning("⚠️ Qdrant disabled (startup will continue)")
 
         logger.info("✅ Auphere Agent ready!")
 

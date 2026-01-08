@@ -200,7 +200,7 @@ async def web_search_tool(
                 "total_results": 0,
                 "language": language,
                 "search_engine": search_engine,
-                "message": "No web search results found. Try refining the query or using google_places_tool.",
+                "message": "No web search results found. Try refining the query or using places_search_tool.",
             }
         
         logger.info(f"Found {len(results)} web search results using {search_engine}")

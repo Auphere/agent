@@ -47,6 +47,26 @@ class Settings(BaseSettings):
     places_api_url: str = "http://localhost:8002"
     places_api_timeout: int = 10
     backend_url: str = "http://localhost:8000"
+
+    # Vector DB (Qdrant) - optional
+    # Local: http://localhost:6333 | Production: Qdrant Cloud URL
+    qdrant_enabled: bool = False
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: Optional[str] = None  # Required for Qdrant Cloud
+    qdrant_collection_plans: str = "plans"
+    qdrant_collection_user_profiles: str = "user_profiles"
+    qdrant_collection_places: str = "places"
+
+    # Embeddings config (MVP)
+    embeddings_model: str = "text-embedding-3-small"
+    embeddings_dimensions: int = 1536
+    qdrant_distance: str = "cosine"  # cosine | dot | euclid
+    
+    # Analytics (PostHog) - optional
+    # Local: console logging | Production: PostHog Cloud
+    posthog_enabled: bool = False
+    posthog_api_key: Optional[str] = None  # Required for production
+    posthog_host: str = "https://app.posthog.com"  # PostHog Cloud
     
     # Cache TTLs (in seconds)
     cache_ttl_intent: int = 3600  # 1 hour

@@ -28,7 +28,7 @@ class LLMRouter:
         - CHITCHAT: gpt-3.5-turbo (simple responses)
         
         Tool Usage Considerations:
-        - google_places_tool: Works well with any model (data-driven)
+        - places_search_tool: Works well with any model (data-driven)
         - rank_by_score_tool: Benefits from better reasoning (prefer gpt-4-turbo+)
         - calculate_route_tool: Works well with any model (API-driven)
         - generate_itinerary_tool: Benefits from better reasoning (prefer gpt-4-turbo+)
@@ -64,7 +64,7 @@ class LLMRouter:
                 selected_model_key = "gpt-4o-mini"  # Simple recommendations
 
         elif intention == IntentType.SEARCH:
-            # Search is mostly tool-driven (google_places_tool, web_search_tool)
+            # Search is mostly tool-driven (places_search_tool, web_search_tool)
             # Less reasoning needed, prefer faster/cheaper model
             selected_model_key = "gpt-4o-mini"
             

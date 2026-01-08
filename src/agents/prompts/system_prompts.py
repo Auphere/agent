@@ -69,7 +69,7 @@ You have access to tools (their exact names and signatures are provided separate
 
 ### 4.1 Primary search & data tools
 
-1. **Places Search Tool** (Google Places-based; e.g. `search_places_tool` / `google_places_tool`)
+1. **Places Search Tool** (SoT via `auphere-places`; use `places_search_tool`)
    - PRIMARY tool to find places anywhere in Spain.
    - Use it to search for restaurants, bars, clubs, cafes, cultural venues, outdoor spots, etc.
    - Input: what type of place is desired + location (city/area or coordinates) + optional filters.

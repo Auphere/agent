@@ -9,11 +9,17 @@ Multi-factor scoring algorithm that considers:
 - Availability/open status
 - Popularity
 - User preferences
+
+Enhanced with:
+- Dynamic result count selection based on quality threshold
+- User-requested count respect
+- Hard limits (min 3, max 10) for response consistency
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.tools import tool
 from pydantic import BaseModel
@@ -21,6 +27,15 @@ from pydantic import BaseModel
 from src.utils.logger import get_logger
 
 logger = get_logger("scoring_tool")
+
+# ============================================================================
+# Constants for dynamic count selection
+# ============================================================================
+
+MIN_RESULTS = 3  # Minimum places to return (unless fewer available)
+MAX_RESULTS = 10  # Maximum places to return (to avoid heavy responses)
+DEFAULT_RESULTS = 5  # Default when user doesn't specify
+QUALITY_THRESHOLD = 0.5  # Minimum score to include a place
 
 
 class ScoringWeights(BaseModel):
@@ -47,7 +62,9 @@ def _score_rating(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
 
 def _score_price(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on price match with budget (0-1)."""
-    price_level = place.get("price_level")
+    price_level = place.get("priceLevel")
+    if price_level is None:
+        price_level = place.get("price_level")
     budget = requirements.get("budget", "medium")
     
     # Map budget to price level (1-4)
@@ -85,7 +102,8 @@ def _score_distance(place: Dict[str, Any], requirements: Dict[str, Any]) -> floa
     
     # Simple distance calculation (not accurate, but good enough for ranking)
     lat_diff = abs(place_location.get("lat", 0) - user_location.get("lat", 0))
-    lon_diff = abs(place_location.get("lon", 0) - user_location.get("lon", 0))
+    lon_val = place_location.get("lon", place_location.get("lng", 0))
+    lon_diff = abs(lon_val - user_location.get("lon", user_location.get("lng", 0)))
     distance = (lat_diff ** 2 + lon_diff ** 2) ** 0.5
     
     # Score: 1.0 for very close, decreases with distance
@@ -96,7 +114,10 @@ def _score_distance(place: Dict[str, Any], requirements: Dict[str, Any]) -> floa
 
 def _score_vibe(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on vibe/atmosphere match (0-1)."""
-    desired_vibe = requirements.get("vibe", "").lower()
+    desired_vibe = (requirements.get("vibe") or "").strip().lower()
+    if not desired_vibe and isinstance(requirements.get("vibes"), list):
+        # Accept plan-style requirements where vibes is a list.
+        desired_vibe = str((requirements.get("vibes") or [""])[0]).strip().lower()
     if not desired_vibe:
         return 0.5  # No vibe preference, neutral score
     
@@ -136,6 +157,8 @@ def _score_vibe(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
 def _score_availability(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on availability (0-1)."""
     open_now = place.get("open_now")
+    if open_now is None:
+        open_now = place.get("is_open")
     
     if open_now is None:
         return 0.5  # Unknown, neutral score
@@ -145,7 +168,11 @@ def _score_availability(place: Dict[str, Any], requirements: Dict[str, Any]) -> 
 
 def _score_popularity(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on popularity (review count) (0-1)."""
-    review_count = place.get("user_ratings_total", 0)
+    review_count = place.get("reviewCount")
+    if review_count is None:
+        review_count = place.get("review_count")
+    if review_count is None:
+        review_count = place.get("user_ratings_total", 0)
     
     # Score based on review count (logarithmic scale)
     if review_count == 0:
@@ -160,15 +187,129 @@ def _score_popularity(place: Dict[str, Any], requirements: Dict[str, Any]) -> fl
         return 1.0
 
 
+# ============================================================================
+# Dynamic Count Selection
+# ============================================================================
+
+def extract_requested_count(query: str) -> Optional[int]:
+    """
+    Extract user-requested count from query text.
+    
+    Examples:
+        - "dame 2 opciones" -> 2
+        - "recomiendame 3 bares" -> 3
+        - "top 5 restaurantes" -> 5
+        - "muéstrame restaurantes" -> None (no specific count)
+    
+    Args:
+        query: User query text
+        
+    Returns:
+        Requested count or None if not specified
+    """
+    query_lower = query.lower()
+    
+    # Patterns to match explicit count requests
+    patterns = [
+        r"(\d+)\s*(?:opciones?|options?)",  # "2 opciones", "3 options"
+        r"(\d+)\s*(?:lugares?|places?|sitios?|spots?)",  # "5 lugares"
+        r"(\d+)\s*(?:restaurantes?|bares?|cafes?|clubs?)",  # "3 restaurantes"
+        r"(?:dame|give me|show me|muéstrame|recomiéndame|recommend)\s*(\d+)",  # "dame 2"
+        r"(?:top|mejores?|best)\s*(\d+)",  # "top 5", "mejores 3"
+        r"(\d+)\s*(?:recomendaciones?|recommendations?)",  # "5 recomendaciones"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            try:
+                count = int(match.group(1))
+                # Validate reasonable range
+                if 1 <= count <= MAX_RESULTS:
+                    return count
+            except (ValueError, IndexError):
+                continue
+    
+    return None
+
+
+def determine_optimal_count(
+    ranked_places: List[Dict[str, Any]],
+    user_requested: Optional[int] = None,
+    quality_threshold: float = QUALITY_THRESHOLD,
+) -> int:
+    """
+    Determine how many places to return based on multiple factors.
+    
+    Priority:
+    1. User explicit request (e.g., "2 opciones") - respected up to MAX_RESULTS
+    2. Score distribution - only include places above quality threshold
+    3. Hard limits: min=MIN_RESULTS, max=MAX_RESULTS
+    
+    Args:
+        ranked_places: List of scored places (each has 'score' key)
+        user_requested: Number explicitly requested by user (or None)
+        quality_threshold: Minimum score to include a place
+        
+    Returns:
+        Optimal number of places to return
+    """
+    total_available = len(ranked_places)
+    
+    if total_available == 0:
+        return 0
+    
+    # 1. If user requested specific count, respect it (capped at MAX_RESULTS)
+    if user_requested is not None:
+        return min(user_requested, total_available, MAX_RESULTS)
+    
+    # 2. Count places above quality threshold
+    quality_places = sum(
+        1 for p in ranked_places 
+        if p.get("score", 0) >= quality_threshold
+    )
+    
+    # 3. Apply hard limits
+    # If we have many quality places, return up to DEFAULT_RESULTS
+    # If few quality places, return at least MIN_RESULTS (if available)
+    if quality_places >= DEFAULT_RESULTS:
+        return min(DEFAULT_RESULTS, total_available, MAX_RESULTS)
+    elif quality_places >= MIN_RESULTS:
+        return quality_places
+    else:
+        # Return what we have, up to MIN_RESULTS
+        return min(MIN_RESULTS, total_available)
+
+
+def select_top_places(
+    ranked_places: List[Dict[str, Any]],
+    count: int,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Select top N places from ranked list.
+    
+    Args:
+        ranked_places: Full list of ranked places
+        count: Number to select
+        
+    Returns:
+        Tuple of (selected_places, actual_count)
+    """
+    selected = ranked_places[:count]
+    return selected, len(selected)
+
+
 @tool
 async def rank_by_score_tool(
-    places: List[Dict[str, Any]],
-    requirements: Dict[str, Any],
+    places: Optional[List[Dict[str, Any]]] = None,
+    requirements: Optional[Dict[str, Any]] = None,
     weights: Optional[Dict[str, float]] = None,
     language: str = "es",
+    user_query: Optional[str] = None,
+    requested_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Rank places by multi-factor scoring based on user requirements.
+    Rank places by multi-factor scoring and return optimal number of results.
     
     Scoring factors (default weights):
     - Rating (25%): Higher rated places score better
@@ -177,28 +318,57 @@ async def rank_by_score_tool(
     - Vibe (15%): Match with desired atmosphere
     - Availability (10%): Open now vs closed
     - Popularity (10%): Number of reviews
-    - Preferences (5%): User historical preferences
+    
+    Dynamic Count Selection:
+    - If user requests specific count (e.g., "2 opciones"), respects it
+    - Otherwise, returns quality-filtered results (score > 0.5)
+    - Hard limits: min 3, max 10 places
     
     Args:
         places: List of place objects to rank
         requirements: User requirements (vibe, budget, location, preferences, etc.)
         weights: Optional custom weights for scoring factors (overrides defaults)
         language: Language for explanations ("es" or "en")
+        user_query: Original user query (to extract requested count)
+        requested_count: Explicit count override (if already extracted)
     
     Returns:
-        Ranked list of places with scores and explanations
+        Ranked and filtered list of places with scores
+        - ranked_places: The selected top places (already limited)
+        - actual_count: EXACT number of places returned (use this in response!)
+        - total_scored: Total places that were scored (before filtering)
     
     Examples:
-        - rank_by_score_tool(places, {"budget": "medium", "vibe": "romantic"})
-        - rank_by_score_tool(places, {"location": {"lat": 41.65, "lon": -0.89}, "budget": "low"})
+        - rank_by_score_tool(places, {"budget": "medium"}, user_query="dame 2 opciones")
+        - rank_by_score_tool(places, {"vibe": "romantic"}, requested_count=5)
     """
     try:
-        logger.info(f"Ranking {len(places)} places with custom scoring")
+        if places is None or requirements is None:
+            return {
+                "error": True,
+                "message": (
+                    "Missing required inputs. Please call rank_by_score_tool again with BOTH "
+                    "`places` (list of place objects from places_search_tool) and "
+                    "`requirements` (dict with budget/vibe/location)."
+                ),
+                "expected": {
+                    "places": "[PlaceNormalized, ...]",
+                    "requirements": {"budget": "low|medium|high", "vibe": "string", "location": {"lat": 0, "lon": 0}},
+                    "user_query": "original query to extract count (optional)",
+                    "requested_count": "explicit count override (optional)",
+                },
+                "ranked_places": [],
+                "actual_count": 0,
+                "total_scored": 0,
+            }
+
+        logger.info(f"Ranking {len(places)} places with dynamic count selection")
         
         if not places:
             return {
                 "ranked_places": [],
-                "total_places": 0,
+                "actual_count": 0,
+                "total_scored": 0,
                 "message": "No places to rank.",
             }
         
@@ -240,13 +410,29 @@ async def rank_by_score_tool(
             })
         
         # Sort by score (descending)
-        ranked_places = sorted(scored_places, key=lambda x: x["score"], reverse=True)
+        all_ranked = sorted(scored_places, key=lambda x: x["score"], reverse=True)
+        total_scored = len(all_ranked)
         
-        logger.info(f"Ranking complete. Top score: {ranked_places[0]['score'] if ranked_places else 0}")
+        # Determine optimal count
+        user_count = requested_count
+        if user_count is None and user_query:
+            user_count = extract_requested_count(user_query)
+        
+        optimal_count = determine_optimal_count(all_ranked, user_count)
+        
+        # Select top places
+        selected_places, actual_count = select_top_places(all_ranked, optimal_count)
+        
+        logger.info(
+            f"Ranking complete. Scored: {total_scored}, Returning: {actual_count}, "
+            f"Top score: {selected_places[0]['score'] if selected_places else 0}"
+        )
         
         return {
-            "ranked_places": ranked_places,
-            "total_places": len(ranked_places),
+            "ranked_places": selected_places,
+            "actual_count": actual_count,  # CRITICAL: Use this in response text!
+            "total_scored": total_scored,
+            "user_requested_count": user_count,
             "weights_used": scoring_weights.model_dump(),
             "requirements": requirements,
             "language": language,
@@ -257,5 +443,7 @@ async def rank_by_score_tool(
         return {
             "error": True,
             "message": f"Could not rank places: {str(e)}",
+            "ranked_places": [],
+            "actual_count": 0,
         }
 

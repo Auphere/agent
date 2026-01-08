@@ -143,9 +143,11 @@ Your task: Create a step-by-step plan to accomplish the user's request.
 ## AVAILABLE TOOLS:
 
 1. geocode_city_tool: Get coordinates for a city (use first if city mentioned)
-2. google_places_tool: Search for restaurants, bars, activities
-3. rank_by_score_tool: Rank results by quality
-4. generate_plan_json_tool: Create final structured itinerary (use last)
+2. places_search_tool: Search for restaurants, bars, activities (via auphere-places SoT)
+3. rank_by_score_tool: Rank results by quality (deterministic)
+4. places_clusters_tool: Cluster places into zones (PostGIS, deterministic)
+5. calculate_route_tool: Estimate/optimize route order and travel time
+6. generate_plan_json_tool: Create final structured itinerary (use last)
 
 ## OUTPUT FORMAT:
 
@@ -154,8 +156,11 @@ Return ONLY valid JSON:
 {{
   "plan": [
     "Step 1: Use geocode_city_tool to get coordinates for [city]",
-    "Step 2: Use google_places_tool to search for [type] in [city]",
-    "Step 3: Use generate_plan_json_tool to create itinerary"
+    "Step 2: Use places_search_tool to search for [type] in [city]",
+    "Step 3: Use rank_by_score_tool to rank results for [criteria] and keep only top K",
+    "Step 4: Use places_clusters_tool to cluster top candidates by zones (optional)",
+    "Step 5: Use calculate_route_tool to optimize order and travel times (optional)",
+    "Step 6: Use generate_plan_json_tool to create itinerary"
   ],
   "reasoning": "Brief explanation"
 }}
@@ -182,6 +187,15 @@ Context:
 Execute this step using the appropriate tools available to you.
 Be thorough and extract all relevant information.
 Focus on quality over quantity.
+
+CRITICAL TOOL USAGE RULES:
+- When calling `rank_by_score_tool`, you MUST pass:
+  - `places`: the EXACT list returned by the previous `places_search_tool` call (do not invent)
+  - `requirements`: a dict built from plan params (budget/vibe) and location if available:
+    - budget: "low" | "medium" | "high" (or a numeric budget_per_person if you have it)
+    - vibe: a short string like "cultural", "romantic", etc. (or omit if unknown)
+    - location: { "lat": number, "lon": number } when you have coordinates
+- Do not call `rank_by_score_tool` with partial args (it won't be able to rank).
 """
 
 REPLANNER_PROMPT = """You are an expert replanner agent that adapts plans based on execution results.
@@ -468,7 +482,7 @@ class PlanAndExecuteAgent:
         except Exception as e:
             self.logger.error("plan-parsing-error", error=str(e))
             plan = [
-                "Step 1: Use google_places_tool to search for places.",
+                "Step 1: Use places_search_tool to search for places.",
                 "Step 2: Use generate_plan_json_tool to create itinerary.",
             ]
 
@@ -585,7 +599,11 @@ Execute the step now using the appropriate tools."""
                     action, observation = step
                     tool_name = action.tool if hasattr(action, 'tool') else str(action)
                     
-                    if "google_places" in tool_name.lower() or "foursquare" in tool_name.lower():
+                    if (
+                        "places_search" in tool_name.lower()
+                        or "places_get_place" in tool_name.lower()
+                        or "google_places" in tool_name.lower()
+                    ):
                         if isinstance(observation, list):
                             places.extend(observation)
                         elif isinstance(observation, dict) and "places" in observation:
@@ -760,8 +778,21 @@ Execute the step now using the appropriate tools."""
         # Ensure graph is initialized
         await self._ensure_graph_initialized()
 
-        # Prepare serializable context (without plan_params - that's in state now)
-        serializable_context = {k: v for k, v in context.items() if k not in ["history_messages", "plan_params"]}
+        # Prepare serializable context for LangGraph checkpointing.
+        #
+        # IMPORTANT: LangGraph's Postgres checkpointer serializes state via msgpack.
+        # SQLAlchemy models (e.g., ConversationTurn) are NOT msgpack-serializable.
+        # We therefore exclude any rich objects and keep only JSON-serializable primitives.
+        serializable_context = {
+            k: v
+            for k, v in context.items()
+            if k
+            not in [
+                "history_messages",
+                "plan_params",
+                "recent_turns",  # contains SQLAlchemy ConversationTurn objects (non-serializable)
+            ]
+        }
 
         if "history_messages" in context and context["history_messages"]:
             history_summary = []

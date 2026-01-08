@@ -18,21 +18,14 @@ from langchain_core.tools import BaseTool, tool
 # Context and memory tools
 from src.tools.context_tool import update_plan_context_tool
 
-# Legacy tools (to be integrated/deprecated)
-from src.tools.place_tool import search_places_tool
-from src.tools.plan_tool import PlanTool
+# Places SoT tools (auphere-places)
+from src.tools.place_tool import places_search_tool, places_get_place_tool, places_clusters_tool
 
-# NEW: Search tools (external APIs)
+# Search tools (external APIs)
 from src.tools.search import (
-    google_places_tool,  # 🎯 BETA PRIMARY: Direct Google Places API
+    google_places_tool,  # Fallback only (when auphere-places is unavailable)
     web_search_tool,
     weather_api_tool,
-    search_foursquare_places,  # NEW: Foursquare v2 (105M POIs)
-    get_foursquare_place_enrichment,  # NEW: Foursquare details
-    scrape_instagram_place,  # NEW: Instagram scraping
-    scrape_tiktok_place,  # NEW: TikTok scraping
-    scrape_tripadvisor_reviews,  # NEW: TripAdvisor scraping
-    get_social_media_summary,  # NEW: Combined social media data
     geocode_city_tool,  # NEW: Geocoding
 )
 
@@ -51,59 +44,6 @@ from src.tools.processing import (
 )
 
 
-# Initialize plan tool (legacy)
-_plan_tool_instance = PlanTool()
-
-
-@tool
-async def create_itinerary_tool_legacy(
-    query: str,
-    city: str = "Zaragoza",
-    num_locations: int = 3,
-    plan_type: str = "casual",
-) -> dict:
-    """
-    [LEGACY] Create an optimized itinerary plan with multiple locations in Zaragoza.
-    
-    ⚠️ NOTE: This is the legacy tool. The new generate_itinerary_tool provides
-    more features and better integration with routing and scoring.
-    
-    🚧 BETA: Currently ONLY creates plans for Zaragoza, Spain.
-
-    Args:
-        query: Description of desired plan (e.g., "bar hopping", "tourist day")
-        city: City name (MUST be "Zaragoza" - other cities not yet supported)
-        num_locations: Number of locations to include (2-10, default: 3)
-        plan_type: Type of plan - "quick", "casual", or "full_day"
-
-    Returns:
-        Complete itinerary with optimized route, time estimates, and recommendations
-    """
-    # BETA: Enforce Zaragoza only
-    if city.lower() not in ["zaragoza", "zaragosa", "saragossa"]:
-        return {
-            "error": True,
-            "message": f"⚠️ Currently we can only create plans in Zaragoza. Would you like to create a '{query}' plan in Zaragoza instead?"
-        }
-    
-    # Force city to be Zaragoza
-    city = "Zaragoza"
-    
-    try:
-        itinerary = await _plan_tool_instance.create_plan(
-            query=query,
-            city=city,
-            num_locations=num_locations,
-            plan_type=plan_type,
-        )
-        return itinerary.model_dump()
-    except Exception as e:
-        return {
-            "error": True,
-            "message": f"Could not create plan: {str(e)}. Try with fewer locations or different plan type."
-        }
-
-
 def get_available_tools() -> List[BaseTool]:
     """
     Return the list of tools available for the agent.
@@ -112,17 +52,11 @@ def get_available_tools() -> List[BaseTool]:
     
     SEARCH TOOLS (Real-time data):
     1. geocode_city_tool - Geocode city/area to coordinates
-    2. google_places_tool - PRIMARY search for places (Google Places API direct)
-    3. search_foursquare_places - 105M+ global POIs with rich metadata
-    4. get_foursquare_place_enrichment - Detailed Foursquare data
-    5. web_search_tool - Web search for reviews, events, context
+    2. places_search_tool - PRIMARY search for places (auphere-places SoT)
+    3. places_get_place_tool - PRIMARY detail (auphere-places SoT)
+    4. google_places_tool - Fallback only if auphere-places is unavailable
+    5. web_search_tool - Web search for reviews/events/context (optional)
     6. weather_api_tool - Weather for indoor/outdoor recommendations
-    
-    SOCIAL MEDIA ENRICHMENT:
-    6. scrape_instagram_place - Instagram posts and trends
-    7. scrape_tiktok_place - TikTok videos and viral content
-    8. scrape_tripadvisor_reviews - Detailed reviews
-    9. get_social_media_summary - Combined social media data
     
     PROCESSING TOOLS:
     10. calculate_route_tool - Route optimization and travel times
@@ -137,24 +71,18 @@ def get_available_tools() -> List[BaseTool]:
     CONTEXT TOOLS:
     16. update_plan_context_tool - Save plan details to memory
     
-    LEGACY TOOLS (Being phased out):
-    17. search_places_tool - Old search (use google_places_tool instead)
-    18. create_itinerary_tool_legacy - Old itinerary (use generate_itinerary_tool)
+    Notes:
+    - Social media scraping tools are intentionally excluded (out of scope).
     """
     return [
         # PRIMARY SEARCH TOOLS (External APIs - Real-time)
         geocode_city_tool,            # Geocode first when city provided
-        google_places_tool,           # 🎯 PRIMARY place search (Google Places API direct)
-        search_foursquare_places,     # NEW: Foursquare 105M+ POIs
-        get_foursquare_place_enrichment,  # NEW: Foursquare details
+        places_search_tool,           # 🎯 PRIMARY place search (auphere-places SoT)
+        places_get_place_tool,        # 🎯 PRIMARY place detail (auphere-places SoT)
+        places_clusters_tool,         # Deterministic clustering (PostGIS)
+        google_places_tool,           # Fallback only
         web_search_tool,              # Web search for context
         weather_api_tool,             # Weather context
-        
-        # SOCIAL MEDIA ENRICHMENT (NEW)
-        scrape_instagram_place,       # Instagram posts
-        scrape_tiktok_place,          # TikTok videos
-        scrape_tripadvisor_reviews,   # TripAdvisor reviews
-        get_social_media_summary,     # Combined social media
         
         # PROCESSING TOOLS
         calculate_route_tool,         # Routing and distances
@@ -169,9 +97,6 @@ def get_available_tools() -> List[BaseTool]:
         # CONTEXT/MEMORY TOOLS
         update_plan_context_tool,    # Plan memory
         
-        # LEGACY TOOLS (for backward compatibility)
-        search_places_tool,          # Legacy search (via auphere-places Rust)
-        create_itinerary_tool_legacy,  # Legacy itinerary
     ]
 
 
@@ -182,17 +107,12 @@ def get_core_tools() -> List[BaseTool]:
     """
     return [
         # Search
-        google_places_tool,
-        search_foursquare_places,
-        get_foursquare_place_enrichment,
+        places_search_tool,
+        places_get_place_tool,
+        places_clusters_tool,
+        google_places_tool,  # fallback
         web_search_tool,
         weather_api_tool,
-        
-        # Social Media
-        scrape_instagram_place,
-        scrape_tiktok_place,
-        scrape_tripadvisor_reviews,
-        get_social_media_summary,
         
         # Processing
         calculate_route_tool,
@@ -216,8 +136,10 @@ def get_search_tools() -> List[BaseTool]:
     """
     return [
         geocode_city_tool,            # Geocode bias
-        google_places_tool,           # PRIMARY search (Google Places API direct)
-        search_foursquare_places,     # Foursquare 105M POIs
+        places_search_tool,           # PRIMARY search (auphere-places SoT)
+        places_get_place_tool,        # Detail for references
+        places_clusters_tool,         # Cluster for zone-based suggestions (optional)
+        google_places_tool,           # Fallback only
         web_search_tool,              # Additional context
         search_local_db_fallback_tool, # Fallback
     ]
@@ -233,13 +155,10 @@ def get_plan_tools() -> List[BaseTool]:
     
     return [
         geocode_city_tool,           # Geocode city/area
-        google_places_tool,          # Find places (Google Places API direct)
-        search_foursquare_places,    # Foursquare rich POI data
-        get_foursquare_place_enrichment,  # Detailed place info
-        scrape_instagram_place,      # Visual content
-        scrape_tiktok_place,         # Trending content
-        scrape_tripadvisor_reviews,  # Reviews
-        get_social_media_summary,    # Combined social data
+        places_search_tool,          # Find places (auphere-places SoT)
+        places_get_place_tool,       # Detail (enrichment on-demand)
+        places_clusters_tool,        # Cluster by zones (deterministic)
+        google_places_tool,          # Fallback only
         weather_api_tool,            # Weather context
         calculate_route_tool,        # Route optimization
         rank_by_score_tool,         # Rank options
@@ -257,13 +176,12 @@ def get_recommend_tools() -> List[BaseTool]:
     Optimized for ranking and scoring with social proof.
     """
     return [
-        google_places_tool,          # Find candidates (Google Places API direct)
-        search_foursquare_places,    # Foursquare data
-        get_foursquare_place_enrichment,  # Detailed info
+        places_search_tool,          # Find candidates (auphere-places SoT)
+        places_get_place_tool,       # Detail on demand
+        places_clusters_tool,        # Optional clustering
+        google_places_tool,          # Fallback only
         weather_api_tool,            # Weather context
         rank_by_score_tool,         # PRIMARY for recommendations
-        scrape_instagram_place,      # Social proof
-        scrape_tripadvisor_reviews,  # Reviews
         web_search_tool,            # Reviews and context
         search_local_db_fallback_tool, # Fallback
     ]

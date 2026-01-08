@@ -30,6 +30,10 @@ def clean_response_text(text: str) -> str:
     # Remove other common URLs (but keep place names)
     url_pattern = r'https?://[^\s\)]+'
     cleaned = re.sub(url_pattern, '', cleaned)
+
+    # Remove markdown images (e.g. ![alt](url) or ![alt]())
+    image_pattern = r'!\[[^\]]*\]\([^\)]*\)'
+    cleaned = re.sub(image_pattern, '', cleaned)
     
     # Remove excessive whitespace and clean up
     cleaned = re.sub(r'\s+', ' ', cleaned)

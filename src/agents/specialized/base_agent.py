@@ -34,7 +34,110 @@ from src.config.settings import Settings, get_settings
 from src.utils.logger import get_logger
 from src.utils.cache_manager import get_cache_manager
 from src.utils.metrics import get_metrics_collector, timed
+from src.utils.language_handler import get_language_handler, LanguageHandler
+from src.utils.response_validator import get_response_validator, ResponseValidator
 
+
+# ============================================================================
+# Reference resolution helpers (e.g., "el segundo", "the first one")
+# ============================================================================
+
+_ORDINAL_TO_INDEX: Dict[str, int] = {
+    # Spanish
+    "primero": 1,
+    "primer": 1,
+    "primera": 1,
+    "segundo": 2,
+    "segunda": 2,
+    "tercero": 3,
+    "tercera": 3,
+    "cuarto": 4,
+    "cuarta": 4,
+    "quinto": 5,
+    "quinta": 5,
+    # English
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+}
+
+
+def _extract_reference_position(query: str) -> Optional[int]:
+    q = query.lower().strip()
+    for word, idx in _ORDINAL_TO_INDEX.items():
+        if f" {word}" in f" {q}":
+            return idx
+
+    # Minimal numeric support only when explicitly phrased as "del 2" / "the 2nd"
+    import re
+
+    m = re.search(r"\bdel\s+(\d+)\b", q)
+    if m:
+        try:
+            n = int(m.group(1))
+            return n if 1 <= n <= 10 else None
+        except Exception:
+            return None
+
+    m = re.search(r"\bthe\s+(\d+)(?:st|nd|rd|th)?\b", q)
+    if m:
+        try:
+            n = int(m.group(1))
+            return n if 1 <= n <= 10 else None
+        except Exception:
+            return None
+
+    return None
+
+
+def _resolve_place_id_from_previous_places(previous_places: List[Dict[str, Any]], position: int) -> Optional[str]:
+    """
+    Select the place referenced by `_position_in_turn` from the most recent turn,
+    returning an identifier that `auphere-places` can resolve (google place_id preferred).
+    """
+    if not previous_places:
+        return None
+
+    def _turn(p: Dict[str, Any]) -> int:
+        try:
+            return int(p.get("_turn_number") or 0)
+        except Exception:
+            return 0
+
+    most_recent_turn = max((_turn(p) for p in previous_places), default=0)
+    candidates = [p for p in previous_places if _turn(p) == most_recent_turn]
+    if not candidates:
+        candidates = previous_places
+
+    target = None
+    # Prefer explicit position metadata (most reliable)
+    for p in candidates:
+        try:
+            if int(p.get("_position_in_turn") or -1) == position:
+                target = p
+                break
+        except Exception:
+            continue
+
+    # Fallback: assume `candidates` are already ordered as shown to the user
+    # (this covers cases where _position_in_turn was not injected).
+    if not target:
+        idx = position - 1
+        if 0 <= idx < len(candidates):
+            target = candidates[idx]
+
+    if not target:
+        return None
+
+    # Preferred: google place id
+    return (
+        target.get("place_id")
+        or target.get("google_place_id")
+        or target.get("id")
+        or target.get("db_id")
+    )
 
 # ============================================================================
 # Shared State Types with proper reducers
@@ -222,7 +325,7 @@ class BaseSpecializedAgent(ABC):
         Returns:
             Tool name or None for auto selection
         """
-        return "google_places_tool"
+        return "places_search_tool"
     
     async def run(
         self,
@@ -235,7 +338,7 @@ class BaseSpecializedAgent(ABC):
         
         Args:
             query: User query
-            language: Response language
+            language: Response language (auto-detected if not specified)
             context: Additional context
             
         Returns:
@@ -243,6 +346,25 @@ class BaseSpecializedAgent(ABC):
         """
         context = context or {}
         start_time = perf_counter()
+        
+        # Language detection and standardization (English-first processing)
+        lang_handler = get_language_handler()
+        detected_lang, response_lang, search_lang, unsupported_msg = lang_handler.process_input(query)
+        
+        # Override language with detected if auto-detection preferred
+        # But respect explicit language parameter if different from default
+        if language == "es" or language == "en":
+            # Use detected language for better UX
+            language = response_lang
+        
+        # Log language detection
+        self.logger.info(
+            "language-processing",
+            detected=detected_lang,
+            response_lang=response_lang,
+            search_lang=search_lang,
+            is_supported=lang_handler.is_supported(detected_lang),
+        )
         
         # Initialize metrics
         metrics_collector = get_metrics_collector()
@@ -259,6 +381,105 @@ class BaseSpecializedAgent(ABC):
             timeout=str(self._timeout_config),
         )
         
+        # Fast-path: resolve references like "el segundo" using previous_places + places_get_place_tool.
+        # This avoids forcing places_search_tool and removes an unnecessary extra search round-trip.
+        previous_places = context.get("previous_places", []) if isinstance(context, dict) else []
+        position = _extract_reference_position(query)
+        if position and previous_places:
+            place_identifier = _resolve_place_id_from_previous_places(previous_places, position)
+            if place_identifier:
+                self.logger.info(
+                    "reference-resolved",
+                    query=query,
+                    position=position,
+                    resolved_id=place_identifier,
+                    previous_places_count=len(previous_places),
+                )
+                tool = next((t for t in self.tools if t.name == "places_get_place_tool"), None)
+                if tool:
+                    try:
+                        tool_start = perf_counter()
+                        tool_result = await asyncio.wait_for(
+                            tool.ainvoke({"place_id": place_identifier}),
+                            timeout=self.settings.tool_timeout,
+                        )
+                        tool_duration = perf_counter() - tool_start
+                        self.logger.debug(
+                            "tool-executed",
+                            tool="places_get_place_tool",
+                            duration_ms=int(tool_duration * 1000),
+                        )
+
+                        place = None
+                        if isinstance(tool_result, dict) and tool_result.get("success") and tool_result.get("place"):
+                            place = tool_result["place"]
+
+                        if place:
+                            # Keep response text short; cards will show full detail.
+                            name = place.get("name") or "Este lugar"
+                            rating = place.get("rating")
+                            count = place.get("user_ratings_total")
+                            price = place.get("price_level")
+
+                            if language.startswith("es"):
+                                parts = [f"Aquí tienes más info de **{name}**."]
+                                if rating:
+                                    suffix = f"⭐ {rating}/5"
+                                    if count:
+                                        suffix += f" ({count} reseñas)"
+                                    parts.append(suffix + ".")
+                                if price is not None:
+                                    parts.append(f"Precio (Google): {price}/4.")
+                                parts.append("¿Quieres ver fotos/reseñas o que lo agregue a un plan?")
+                                response_text = " ".join(parts)
+                            else:
+                                parts = [f"Here’s more info about **{name}**."]
+                                if rating:
+                                    suffix = f"⭐ {rating}/5"
+                                    if count:
+                                        suffix += f" ({count} reviews)"
+                                    parts.append(suffix + ".")
+                                if price is not None:
+                                    parts.append(f"Price level (Google): {price}/4.")
+                                parts.append("Want photos/reviews, or should I add it to a plan?")
+                                response_text = " ".join(parts)
+
+                            # Save/update in DB (best-effort)
+                            places = [place]
+                            try:
+                                places = await save_places_to_db(places, self.settings)
+                                self.logger.info("places-saved-to-db", count=len(places))
+                            except Exception as exc:
+                                self.logger.error("failed-to-save-places", error=str(exc))
+
+                            total_duration = perf_counter() - start_time
+                            agent_metrics.tool_calls = 1
+                            agent_metrics.places_found = len(places)
+                            metrics_collector.end_agent_execution(agent_metrics, success=True)
+
+                            return {
+                                "response_text": clean_response_text(response_text),
+                                "places": places,
+                                "tool_calls": 1,
+                                "reasoning_steps": 1,
+                                "agent_type": self.agent_type,
+                                "model_used": self.llm.model_name,
+                                "duration_ms": int(total_duration * 1000),
+                            }
+                    except Exception as exc:
+                        # If anything goes wrong, fall back to normal LLM flow.
+                        self.logger.warning("reference-fast-path-failed", error=str(exc))
+            else:
+                # We detected an ordinal reference but couldn't map it to an id.
+                # This is usually due to missing `_position_in_turn` / ordering in previous_places.
+                self.logger.warning(
+                    "reference-detected-but-unresolved",
+                    query=query,
+                    position=position,
+                    previous_places_count=len(previous_places),
+                    sample_keys=list(previous_places[0].keys()) if previous_places else [],
+                )
+
         # Build messages
         system_prompt = self.get_system_prompt(context, language)
         messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
@@ -373,6 +594,19 @@ class BaseSpecializedAgent(ABC):
             
             # Extract places
             places = extract_places_from_messages(messages)
+            
+            # Validate and fix response consistency (count mismatch)
+            if places:
+                validator = get_response_validator()
+                response_text = validator.validate_and_fix(
+                    response_text, 
+                    len(places), 
+                    language
+                )
+            
+            # Prepend unsupported language message if needed
+            if unsupported_msg:
+                response_text = f"{unsupported_msg}\n\n{response_text}"
             
             # Save places to DB
             if places:

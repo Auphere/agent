@@ -46,6 +46,45 @@ class QueryResponse(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ============================================================================
+# PLAN EDIT (Phase 6)
+# ============================================================================
+
+class PlanAiEditRequest(BaseModel):
+    """
+    Request to edit/replan an existing plan deterministically.
+
+    The caller (backend) MUST include the current plan as ground-truth.
+    """
+
+    operation: str = Field(
+        description="replace_stop | remove_stop | add_stop | update_timing"
+    )
+    instruction: str = Field(description="User instruction for the edit")
+    stop_number: Optional[int] = Field(
+        default=None, description="Target stop number (1-based) when applicable"
+    )
+    constraints: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional constraints (budget, vibe, query, radius, etc.)",
+    )
+    language: str = Field(default="es")
+
+
+class PlanAiEditPayload(BaseModel):
+    user_id: str
+    plan_id: str
+    plan: Dict[str, Any] = Field(description="Current plan payload from backend (ground truth)")
+    edit: PlanAiEditRequest
+
+
+class PlanAiEditResponse(BaseModel):
+    success: bool
+    updated_plan: Optional[Dict[str, Any]] = None
+    summary: Optional[str] = None
+    error: Optional[str] = None
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str

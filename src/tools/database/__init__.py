@@ -3,7 +3,7 @@ Database tools for the agent.
 These tools query internal databases and user data.
 
 ⚠️ BETA VERSION: These are FALLBACK/ANALYTICS tools.
-For place searches, prefer external APIs (google_places_tool, web_search_tool, etc.)
+For place searches, prefer SoT tools (places_search_tool, places_get_place_tool) and optionally web_search_tool for extra context.
 Use database tools for:
 - Fallback when APIs fail
 - Analytics and metrics

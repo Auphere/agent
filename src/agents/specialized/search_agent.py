@@ -18,7 +18,7 @@ class SearchAgent(BaseSpecializedAgent):
     
     Characteristics:
     - Uses gpt-4o-mini (fast, cheap)
-    - Focuses on google_places_tool
+    - Focuses on places_search_tool (auphere-places SoT)
     - Quick, concise responses
     - Minimal reasoning steps
     - Uses bind_tools with tool_choice for reliable tool usage
@@ -60,7 +60,7 @@ class SearchAgent(BaseSpecializedAgent):
 
     def should_force_tool(self, query: str) -> bool:
         """
-        SearchAgent almost always needs to use google_places_tool.
+        SearchAgent almost always needs to use places_search_tool.
         
         Force tool usage for any query mentioning:
         - Search actions (busca, encuentra, search, find)
@@ -99,5 +99,5 @@ class SearchAgent(BaseSpecializedAgent):
         return has_action or (has_place and has_location) or has_place
 
     def get_primary_tool_name(self) -> str:
-        """SearchAgent primarily uses google_places_tool."""
-        return "google_places_tool"
+        """SearchAgent primarily uses places_search_tool."""
+        return "places_search_tool"

@@ -2,12 +2,12 @@
 Database fallback tool for querying local PostgreSQL via Rust microservice.
 
 ⚠️ BETA VERSION NOTE:
-This tool is a FALLBACK. The primary search should use google_places_tool
+This tool is a FALLBACK. The primary search should use places_search_tool
 for real-time data. This tool queries the local auphere-places PostgreSQL
 database which contains synced/cached data.
 
 Use local DB for:
-- Fallback when Google Places API fails
+- Fallback when Places service is unavailable or returns too few results
 - Analytics and metrics queries
 - Performance optimization (cached data)
 - Offline mode
@@ -41,9 +41,9 @@ async def search_local_db_fallback_tool(
     """
     Search the local PostgreSQL database for cached place data (FALLBACK TOOL).
     
-    ⚠️ IMPORTANT: This is a FALLBACK tool. For beta version, prefer google_places_tool
+    ⚠️ IMPORTANT: This is a FALLBACK tool. For beta version, prefer places_search_tool
     for real-time data. Use this tool only when:
-    - Google Places API fails or is unavailable
+    - Places service fails or is unavailable
     - Need cached/historical data
     - Need analytics metrics
     - Performance optimization required
@@ -53,7 +53,7 @@ async def search_local_db_fallback_tool(
     
     Args:
         query: Search query (e.g., "italian restaurant", "cocktail bar", "tapas")
-        city: City to search in (currently only "Zaragoza" supported)
+        city: City to search in
         place_type: Specific place type (bar, restaurant, cafe, museum, park)
         min_rating: Minimum rating (0-5)
         max_results: Maximum number of results (default: 20)
@@ -72,7 +72,7 @@ async def search_local_db_fallback_tool(
     
     try:
         logger.info(f"Local DB fallback search: {query} in {city}")
-        logger.warning("Using local DB fallback - consider using google_places_tool for real-time data")
+        logger.warning("Using local DB fallback - consider using places_search_tool for real-time data")
         
         # TODO: Call the auphere-places Rust microservice /places/search endpoint
         # This should use PLACES_API_URL from settings
@@ -83,7 +83,7 @@ async def search_local_db_fallback_tool(
             "results": [],
             "total_results": 0,
             "source": "local_cache",
-            "message": "Local DB fallback tool - queries cached data. Use google_places_tool for real-time data.",
+            "message": "Local DB fallback tool - queries cached data. Use places_search_tool for real-time data.",
         }
         
     except Exception as e:

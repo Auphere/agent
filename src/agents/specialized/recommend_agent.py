@@ -18,7 +18,7 @@ class RecommendAgent(BaseSpecializedAgent):
     
     Characteristics:
     - Uses gpt-4o-mini (fast and cost-effective)
-    - Focuses on google_places_tool + rank_by_score_tool
+    - Focuses on places_search_tool + rank_by_score_tool
     - Opinionated, helpful responses
     - Uses bind_tools with tool_choice for reliable tool usage
     - Timeout: 90s read timeout to allow for complex recommendations
@@ -116,5 +116,5 @@ class RecommendAgent(BaseSpecializedAgent):
         return has_recommend or has_quality or (has_activity and has_place) or has_activity
 
     def get_primary_tool_name(self) -> str:
-        """RecommendAgent primarily uses google_places_tool to find places to recommend."""
-        return "google_places_tool"
+        """RecommendAgent primarily uses places_search_tool to find places to recommend."""
+        return "places_search_tool"

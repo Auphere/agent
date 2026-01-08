@@ -41,6 +41,8 @@ El Agent de Auphere es un sistema de IA conversacional que:
 - **LLMs:** OpenAI GPT-4, Anthropic Claude
 - **Base de datos:** PostgreSQL (con SQLAlchemy)
 - **Caché:** Redis
+- **Vector DB:** Qdrant (local o Cloud)
+- **Analytics:** PostHog (Cloud en producción)
 - **Python:** 3.11+
 
 ### **Dependencias Principales**
@@ -183,6 +185,24 @@ TRACE_LEVEL=debug
 | `DEFAULT_LANGUAGE` | Idioma por defecto | ✅ | `es` |
 | `PREFERRED_MODEL` | Modelo LLM por defecto | ✅ | `gpt-4o-mini` |
 | `BUDGET_MODE` | Modo económico (usa modelos más baratos) | ✅ | `false` |
+
+### **Variables de Qdrant (Vector DB)**
+
+| Variable | Descripción | Requerido | Valor por Defecto |
+|----------|-------------|-----------|-------------------|
+| `QDRANT_ENABLED` | Habilitar Qdrant | ⚠️ | `false` |
+| `QDRANT_URL` | URL de Qdrant (local o Cloud) | ⚠️ | `http://localhost:6333` |
+| `QDRANT_API_KEY` | API Key (solo Qdrant Cloud) | ⚠️ | - |
+
+### **Variables de PostHog (Analytics)**
+
+| Variable | Descripción | Requerido | Valor por Defecto |
+|----------|-------------|-----------|-------------------|
+| `POSTHOG_ENABLED` | Habilitar PostHog | ⚠️ | `false` |
+| `POSTHOG_API_KEY` | Project API Key (solo producción) | ⚠️ | - |
+| `POSTHOG_HOST` | Host de PostHog | ⚠️ | `https://app.posthog.com` |
+
+> **Nota:** En desarrollo (`ENVIRONMENT=development`), PostHog usa console logging. En producción, envía a PostHog Cloud.
 
 ---
 
