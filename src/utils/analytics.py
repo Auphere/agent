@@ -72,14 +72,27 @@ def _init_analytics() -> None:
         return
     
     host = settings.posthog_host
-    
-    _posthog_client = Posthog(
-        api_key=api_key,
-        host=host,
-        debug=False,
-    )
-    
-    logger.info("posthog-initialized", host=host)
+
+    # PostHog Python SDK has had constructor signature changes across versions.
+    # Our goal is to NEVER crash application startup due to analytics.
+    try:
+        # Newer/older variants:
+        # - Posthog(project_api_key, host=..., debug=...)
+        # - Posthog(project_api_key=..., host=..., debug=...)
+        # - Posthog(api_key=..., host=..., debug=...)  (some wrappers)
+        try:
+            _posthog_client = Posthog(api_key=api_key, host=host, debug=False)
+        except TypeError:
+            try:
+                _posthog_client = Posthog(project_api_key=api_key, host=host, debug=False)
+            except TypeError:
+                _posthog_client = Posthog(api_key, host=host, debug=False)
+
+        logger.info("posthog-initialized", host=host)
+    except Exception as exc:
+        # Fail-open: analytics should never prevent the service from booting.
+        _posthog_client = None
+        logger.warning("posthog-init-failed", error=str(exc), host=host)
 
 
 def get_posthog_client() -> Optional["Posthog"]:
@@ -585,4 +598,8 @@ agent_analytics = AgentAnalytics()
 
 
 # Initialize on module load
-_init_analytics()
+try:
+    _init_analytics()
+except Exception as exc:
+    # Absolute fail-open at import time (production stability).
+    logger.warning("analytics-init-failed-on-import", error=str(exc))
