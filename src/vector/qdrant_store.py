@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from langchain_openai import OpenAIEmbeddings
 
@@ -130,16 +131,26 @@ class QdrantStore:
                 try:
                     self._client.get_collection(name)
                     return
+                except UnexpectedResponse as exc:
+                    # Treat 404 as "needs creation"; bubble up other cases
+                    if getattr(exc, "status_code", None) != 404:
+                        raise
                 except Exception:
+                    # Older client/server mismatches may throw other errors; fall through to create
                     pass
 
-                self._client.create_collection(
-                    collection_name=name,
-                    vectors_config=qmodels.VectorParams(
-                        size=int(self.settings.embeddings_dimensions),
-                        distance=distance,
-                    ),
-                )
+                try:
+                    self._client.create_collection(
+                        collection_name=name,
+                        vectors_config=qmodels.VectorParams(
+                            size=int(self.settings.embeddings_dimensions),
+                            distance=distance,
+                        ),
+                    )
+                except UnexpectedResponse as exc:
+                    # If the collection already exists, consider it a success (idempotent ensure)
+                    if getattr(exc, "status_code", None) != 409:
+                        raise
 
             _ensure(self.settings.qdrant_collection_plans)
             _ensure(self.settings.qdrant_collection_user_profiles)
