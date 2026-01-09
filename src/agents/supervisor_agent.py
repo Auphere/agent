@@ -135,7 +135,52 @@ class SupervisorAgent:
                 tool_calls=result.get("tool_calls", 0),
                 duration_ms=int(duration * 1000),
             )
-            
+
+            # PHASE 2.6: Track token usage and cost in PostHog
+            try:
+                from src.utils.analytics import track_event
+
+                # Extract token usage from result metadata
+                metadata = result.get('metadata', {})
+                input_tokens = metadata.get('input_tokens', 0)
+                output_tokens = metadata.get('output_tokens', 0)
+                model_used = result.get('model_used', metadata.get('model', 'unknown'))
+
+                # Estimate cost (rates as of 2024)
+                cost_per_1k = {
+                    'gpt-4o': {'input': 0.0025, 'output': 0.01},
+                    'gpt-4o-mini': {'input': 0.00015, 'output': 0.0006},
+                    'gpt-4-turbo': {'input': 0.01, 'output': 0.03},
+                    'gpt-4': {'input': 0.03, 'output': 0.06},
+                }
+
+                rates = cost_per_1k.get(model_used, {'input': 0, 'output': 0})
+                estimated_cost = (
+                    (input_tokens / 1000) * rates['input'] +
+                    (output_tokens / 1000) * rates['output']
+                )
+
+                track_event(
+                    'agent_execution_cost',
+                    user_id=context.get('user_id'),
+                    properties={
+                        'model_used': model_used,
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens,
+                        'estimated_cost_usd': round(estimated_cost, 4),
+                        'session_id': context.get('session_id'),
+                        'query_id': context.get('query_id'),
+                        'intent': intent.value,
+                        'agent_type': result.get("routed_to", "unknown"),
+                        'duration_ms': int(duration * 1000),
+                        'tool_calls': result.get("tool_calls", 0),
+                    }
+                )
+            except Exception as track_error:
+                # Fail-safe: Don't break execution if tracking fails
+                self.logger.warning("cost-tracking-failed", error=str(track_error))
+
             return result
             
         except asyncio.TimeoutError:
@@ -213,6 +258,28 @@ class SupervisorAgent:
                 self.logger.info("routing-to-fast-plan-agent")
             else:
                 self.logger.info("routing-to-plan-and-execute-agent")
+
+            # PHASE 2.2: Track agent routing decision in PostHog
+            try:
+                from src.utils.analytics import track_event
+
+                track_event(
+                    'agent_routed',
+                    user_id=context.get('user_id'),
+                    properties={
+                        'intent': intent.value,
+                        'routed_to': 'fast_plan' if use_fast_plan else 'plan_and_execute',
+                        'use_fast_plan_flag': bool(context.get('use_fast_plan')),
+                        'session_id': context.get('session_id'),
+                        'query_id': context.get('query_id'),
+                        'conversation_turns': len(context.get('recent_turns', [])),
+                        'budget_exceeded': session_tokens > MAX_TOKENS_PER_SESSION,
+                        'rollback_enabled': use_fast_default,
+                    }
+                )
+            except Exception as track_error:
+                # Fail-safe: Don't break routing if tracking fails
+                self.logger.warning("routing-tracking-failed", error=str(track_error))
 
             # Extract session_id and plan_params from context
             session_id = context.get("session_id")

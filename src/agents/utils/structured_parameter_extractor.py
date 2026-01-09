@@ -126,8 +126,11 @@ class StructuredParameterExtractor:
         Returns:
             PlanParameters object with all extracted fields
         """
+        import time
+        start_time = time.time()
+
         conversation_history = conversation_history or []
-        
+
         # Build full conversation context
         messages_text = []
         for turn in conversation_history:
@@ -211,7 +214,36 @@ IMPORTANT:
                 budget=params.budget_per_person,
                 vibes=params.vibes,
             )
-            
+
+            # PHASE 2.3: Track parameter extraction in PostHog
+            try:
+                from src.utils.analytics import track_event
+
+                extracted_fields = [k for k, v in params.model_dump(exclude_none=True).items() if v]
+                extraction_latency_ms = int((time.time() - start_time) * 1000)
+
+                track_event(
+                    'parameters_extracted',
+                    properties={
+                        'fields_extracted': extracted_fields,
+                        'num_fields': len(extracted_fields),
+                        'has_required_fields': all([
+                            params.num_people is not None,
+                            params.cities is not None and len(params.cities) > 0,
+                            params.budget_per_person is not None,
+                        ]),
+                        'has_num_people': params.num_people is not None,
+                        'has_cities': params.cities is not None and len(params.cities) > 0,
+                        'has_budget': params.budget_per_person is not None,
+                        'has_vibes': params.vibes is not None and len(params.vibes) > 0,
+                        'extraction_latency_ms': extraction_latency_ms,
+                        'conversation_turn': len(conversation_history) + 1,
+                    }
+                )
+            except Exception as track_error:
+                # Fail-safe: Don't break extraction if tracking fails
+                logger.warning("extraction-tracking-failed", error=str(track_error))
+
             return params
             
         except Exception as e:
@@ -285,17 +317,17 @@ IMPORTANT:
     def format_missing_fields_prompt(self, missing: List[str], language: str = "es") -> str:
         """
         Generate a friendly, conversational prompt asking for missing fields.
-        
+
         Args:
             missing: List of missing field names
             language: Response language (es or en)
-            
+
         Returns:
             Natural language question
         """
         if not missing:
             return ""
-        
+
         if language.startswith("es"):
             field_prompts = {
                 "num_people": "¿Cuántas personas van?",
@@ -303,9 +335,9 @@ IMPORTANT:
                 "budget_per_person": "¿Qué presupuesto aproximado por persona?",
                 "vibes": "¿Qué tipo de ambiente buscan? (romántico, animado, tranquilo, elegante, etc.)",
             }
-            
+
             questions = [field_prompts.get(field, field) for field in missing]
-            
+
             if len(questions) == 1:
                 return f"Para crear tu plan perfecto, necesito saber: {questions[0]}"
             elif len(questions) == 2:
@@ -321,9 +353,9 @@ IMPORTANT:
                 "budget_per_person": "Approximate budget per person?",
                 "vibes": "What kind of atmosphere? (romantic, energetic, chill, elegant, etc.)",
             }
-            
+
             questions = [field_prompts.get(field, field) for field in missing]
-            
+
             if len(questions) == 1:
                 return f"To create your perfect plan, I need to know: {questions[0]}"
             elif len(questions) == 2:
@@ -331,4 +363,195 @@ IMPORTANT:
             else:
                 bullets = "\n".join([f"• {q}" for q in questions])
                 return f"To create your perfect plan, I need to know:\n{bullets}"
+
+    def format_missing_fields_prompt_contextual(
+        self,
+        missing: List[str],
+        plan_params: Dict[str, Any],
+        conversation_turns: int = 1,
+        language: str = "es",
+    ) -> str:
+        """
+        Generate context-aware, varied prompts based on conversation state.
+
+        This method creates natural questions that:
+        - Reference what we already know
+        - Vary opening based on turn count
+        - Group related questions together
+        - Feel conversational, not robotic
+
+        Args:
+            missing: List of missing field names
+            plan_params: Current parameters (to reference in questions)
+            conversation_turns: Number of turns so far (for variation)
+            language: Response language (es or en)
+
+        Returns:
+            Natural, varied question with conversational connectors
+        """
+        if not missing:
+            return ""
+
+        # Extract what we already know for context
+        has_city = bool(plan_params.get('cities') or plan_params.get('primary_city'))
+        has_people = plan_params.get('num_people') is not None
+        has_budget = plan_params.get('budget_per_person') is not None
+        has_vibes = bool(plan_params.get('vibes'))
+
+        city_name = plan_params.get('primary_city') or (plan_params.get('cities', [None])[0] if plan_params.get('cities') else None)
+        num_people = plan_params.get('num_people')
+        budget = plan_params.get('budget_per_person')
+
+        if language.startswith("es"):
+            # Vary opening based on turn count
+            if conversation_turns == 1:
+                openers = [
+                    "Para crear tu plan perfecto",
+                    "Para armar el plan ideal",
+                    "Antes de empezar",
+                ]
+            elif conversation_turns == 2:
+                openers = [
+                    "Perfecto, y",
+                    "Genial, ahora",
+                    "Ya casi está, solo",
+                ]
+            else:
+                openers = [
+                    "Último detalle",
+                    "Para afinarlo",
+                    "Solo me falta",
+                ]
+
+            # Select opener based on turn (rotate through options)
+            opener_index = min(conversation_turns - 1, len(openers) - 1)
+            opener = openers[opener_index]
+
+            # Build context-aware questions
+            questions = []
+
+            # Handle cities and num_people together if both missing
+            if "cities" in missing and "num_people" in missing:
+                questions.append("¿cuántas personas van y en qué ciudad?")
+                missing = [m for m in missing if m not in ["cities", "num_people"]]
+            elif "cities" in missing:
+                if has_people:
+                    questions.append(f"¿en qué ciudad quieren el plan?")
+                else:
+                    questions.append("¿en qué ciudad?")
+                missing = [m for m in missing if m != "cities"]
+            elif "num_people" in missing:
+                if has_city:
+                    questions.append(f"¿cuántas personas van?")
+                else:
+                    questions.append("¿cuántas personas?")
+                missing = [m for m in missing if m != "num_people"]
+
+            # Handle budget and vibes together if both missing
+            if "budget_per_person" in missing and "vibes" in missing:
+                if conversation_turns == 1:
+                    questions.append("¿presupuesto aproximado por persona y qué tipo de ambiente buscan? (romántico, animado, tranquilo...)")
+                else:
+                    questions.append("¿presupuesto y qué vibe prefieren?")
+                missing = [m for m in missing if m not in ["budget_per_person", "vibes"]]
+            elif "budget_per_person" in missing:
+                if has_people:
+                    questions.append(f"¿presupuesto aproximado por persona?")
+                else:
+                    questions.append("¿presupuesto total?")
+                missing = [m for m in missing if m != "budget_per_person"]
+            elif "vibes" in missing:
+                if conversation_turns == 1:
+                    questions.append("¿qué tipo de ambiente buscan? (romántico, animado, tranquilo, elegante...)")
+                else:
+                    # Shorter, more direct on later turns
+                    questions.append("¿prefieren algo romántico, animado, o tranquilo?")
+                missing = [m for m in missing if m != "vibes"]
+
+            # Handle any remaining fields
+            for field in missing:
+                if field == "date":
+                    questions.append("¿qué día?")
+                elif field == "start_time":
+                    questions.append("¿a qué hora?")
+
+            # Build final response with context
+            if len(questions) == 0:
+                return ""
+            elif len(questions) == 1:
+                # Add context if we know something
+                if has_city and city_name:
+                    return f"{opener}, necesito saber {questions[0]}"
+                elif has_people:
+                    return f"{opener}, necesito saber {questions[0]}"
+                else:
+                    return f"{opener}, necesito saber {questions[0]}"
+            elif len(questions) == 2:
+                return f"{opener}, necesito saber:\n• {questions[0]}\n• {questions[1]}"
+            else:
+                bullets = "\n".join([f"• {q}" for q in questions[:3]])  # Max 3
+                return f"{opener}, necesito:\n{bullets}"
+
+        else:
+            # English version
+            if conversation_turns == 1:
+                opener = "To create your perfect plan"
+            elif conversation_turns == 2:
+                opener = "Great, now"
+            else:
+                opener = "Last thing"
+
+            questions = []
+
+            # Handle cities and num_people together
+            if "cities" in missing and "num_people" in missing:
+                questions.append("how many people and which city?")
+                missing = [m for m in missing if m not in ["cities", "num_people"]]
+            elif "cities" in missing:
+                if has_people:
+                    questions.append("which city?")
+                else:
+                    questions.append("which city?")
+                missing = [m for m in missing if m != "cities"]
+            elif "num_people" in missing:
+                if has_city:
+                    questions.append("how many people?")
+                else:
+                    questions.append("how many people?")
+                missing = [m for m in missing if m != "num_people"]
+
+            # Handle budget and vibes together
+            if "budget_per_person" in missing and "vibes" in missing:
+                if conversation_turns == 1:
+                    questions.append("approximate budget per person and what kind of atmosphere? (romantic, lively, chill...)")
+                else:
+                    questions.append("budget and what vibe?")
+                missing = [m for m in missing if m not in ["budget_per_person", "vibes"]]
+            elif "budget_per_person" in missing:
+                questions.append("approximate budget per person?")
+                missing = [m for m in missing if m != "budget_per_person"]
+            elif "vibes" in missing:
+                if conversation_turns == 1:
+                    questions.append("what kind of atmosphere? (romantic, lively, chill, elegant...)")
+                else:
+                    questions.append("romantic, lively, or chill vibe?")
+                missing = [m for m in missing if m != "vibes"]
+
+            # Handle remaining fields
+            for field in missing:
+                if field == "date":
+                    questions.append("what day?")
+                elif field == "start_time":
+                    questions.append("what time?")
+
+            # Build final response
+            if len(questions) == 0:
+                return ""
+            elif len(questions) == 1:
+                return f"{opener}, I need to know {questions[0]}"
+            elif len(questions) == 2:
+                return f"{opener}, I need to know:\n• {questions[0]}\n• {questions[1]}"
+            else:
+                bullets = "\n".join([f"• {q}" for q in questions[:3]])
+                return f"{opener}, I need:\n{bullets}"
 

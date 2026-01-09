@@ -929,14 +929,42 @@ class PlanAndExecuteAgent:
             language = state.get("language", "es")
             
             self.logger.debug("execute-stop-condition", plan_params=plan_params)
-            
+
             from src.agents.utils.structured_parameter_extractor import StructuredParameterExtractor
             extractor = StructuredParameterExtractor()
             missing = extractor.get_missing_required(plan_params)
-            question = extractor.format_missing_fields_prompt(missing, language)
-            
-            self.logger.debug("execute-stop-missing", missing=missing, question_length=len(question))
-            
+
+            # PHASE 3.3: Use contextual question generation for natural variation
+            conversation_turns = len(state.get('past_steps', [])) + 1
+            question = extractor.format_missing_fields_prompt_contextual(
+                missing=missing,
+                plan_params=plan_params,
+                conversation_turns=conversation_turns,
+                language=language,
+            )
+
+            self.logger.debug("execute-stop-missing", missing=missing, question_length=len(question), conversation_turns=conversation_turns)
+
+            # PHASE 2.4: Track question generation in PostHog
+            try:
+                from src.utils.analytics import track_event
+
+                track_event(
+                    'missing_info_asked',
+                    user_id=state.get('context', {}).get('user_id'),
+                    properties={
+                        'fields_missing': missing,
+                        'num_fields_missing': len(missing),
+                        'turn_number': len(state.get('past_steps', [])) + 1,
+                        'session_id': state.get('session_id'),
+                        'question_length': len(question),
+                        'language': language,
+                    }
+                )
+            except Exception as track_error:
+                # Fail-safe: Don't break execution if tracking fails
+                self.logger.warning("question-tracking-failed", error=str(track_error))
+
             # Note: With reducers, we just return the NEW items - reducer handles accumulation
             return {
                 "past_steps": [(current_step, {"response": question, "tool_calls": 0})],
@@ -1214,6 +1242,43 @@ Constraints:
                         self.logger.info("places-saved", count=len(unique_places))
                     except Exception as exc:
                         self.logger.error("failed-to-save-places", error=str(exc))
+
+                # PHASE 2.5: Track plan quality metrics in PostHog
+                if plan_json:
+                    try:
+                        import time
+                        from src.utils.analytics import track_event
+
+                        stops = plan_json.get('stops', [])
+                        plan_params = state.get("plan_params", {})
+
+                        # Calculate variety score (unique place types / total stops)
+                        place_types = set(stop.get('category', 'unknown') for stop in stops if stop.get('category'))
+                        variety_score = len(place_types) / len(stops) if stops else 0.0
+
+                        # Get execution time from state
+                        start_time = state.get('start_time', perf_counter())
+                        total_latency_ms = int((perf_counter() - start_time) * 1000)
+
+                        track_event(
+                            'plan_quality_metrics',
+                            user_id=state.get('context', {}).get('user_id'),
+                            properties={
+                                'stops_count': len(stops),
+                                'city': plan_params.get('primary_city', 'unknown'),
+                                'vibes': plan_params.get('vibes', []),
+                                'budget_per_person': plan_params.get('budget_per_person'),
+                                'has_special_occasion': bool(plan_params.get('special_occasion')),
+                                'variety_score': round(variety_score, 2),
+                                'unique_place_types': len(place_types),
+                                'session_id': state.get('session_id'),
+                                'total_latency_ms': total_latency_ms,
+                                'language': state.get('language', 'es'),
+                            }
+                        )
+                    except Exception as track_error:
+                        # Fail-safe: Don't break plan generation if tracking fails
+                        self.logger.warning("plan-quality-tracking-failed", error=str(track_error))
 
                 # With reducers, just return NEW items - reducer handles accumulation
                 return {

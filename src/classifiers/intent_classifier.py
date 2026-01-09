@@ -88,6 +88,37 @@ class IntentClassifier:
                 confidence=result.confidence,
                 complexity=result.complexity
             )
+
+            # PHASE 2.1: Track intent classification in PostHog
+            try:
+                from src.utils.analytics import track_event
+
+                # Determine if mode override occurred
+                mode_override = (
+                    chat_mode == "explore" and
+                    result.intention.value == "RECOMMEND" and
+                    "plan" in query.lower()
+                )
+
+                track_event(
+                    'intent_classified',
+                    user_id=getattr(context, 'user_id', None),
+                    properties={
+                        'intent': result.intention.value,
+                        'confidence': result.confidence,
+                        'complexity': result.complexity,
+                        'chat_mode': chat_mode,
+                        'mode_override': mode_override,
+                        'query_length': len(query),
+                        'language': context.language if context.language else 'es',
+                        'session_id': getattr(context, 'session_id', None),
+                        'has_location': context.location is not None,
+                    }
+                )
+            except Exception as track_error:
+                # Fail-safe: Don't break classification if tracking fails
+                self.logger.warning("intent-tracking-failed", error=str(track_error))
+
             return result
 
         except Exception as exc:
