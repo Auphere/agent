@@ -1,4 +1,8 @@
-"""Lightweight geocoding tool to convert city/area names into coordinates + country metadata."""
+"""Lightweight geocoding tool to convert city/area names into coordinates + country metadata.
+
+Uses Google Geocoding API for high accuracy, especially for Spanish cities.
+Falls back to Nominatim (OpenStreetMap) if Google API is not configured.
+"""
 
 from __future__ import annotations
 
@@ -65,10 +69,95 @@ COUNTRY_NAME_TO_CODE = {
 }
 
 
+async def _geocode_city_google(city: str) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a city/area name using Google Geocoding API with Spanish bias.
+
+    Returns:
+        Dict with latitude, longitude, country_code, country_name, display_name
+        or None if geocoding failed.
+    """
+    settings = get_settings()
+
+    # Check if Google API key is configured
+    google_api_key = getattr(settings, 'google_maps_api_key', None) or getattr(settings, 'google_api_key', None)
+    if not google_api_key:
+        logger.debug("google-geocoding-not-configured", message="No Google API key, will use Nominatim")
+        return None
+
+    if not city or not city.strip():
+        return None
+
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+
+    # Prioritize Spanish results with region biasing
+    params = {
+        "address": city,
+        "key": google_api_key,
+        "region": "ES",  # Bias towards Spain
+        "language": "es",  # Spanish language
+    }
+
+    try:
+        cache = await get_cache_manager()
+        city_norm = city.strip()
+
+        async def _fetch() -> Optional[Dict[str, Any]]:
+            client = _get_http_client()
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("status") != "OK" or not data.get("results"):
+                logger.warning(
+                    "google-geocoding-no-results",
+                    city=city,
+                    status=data.get("status"),
+                )
+                return None
+
+            result = data["results"][0]
+            location = result["geometry"]["location"]
+
+            # Extract country from address components
+            country_code = ""
+            country_name = ""
+            for component in result.get("address_components", []):
+                if "country" in component.get("types", []):
+                    country_code = component.get("short_name", "").upper()
+                    country_name = component.get("long_name", "")
+                    break
+
+            logger.info(
+                "google-geocoding-success",
+                city=city,
+                country_code=country_code,
+                country_name=country_name,
+                display_name=result.get("formatted_address"),
+            )
+
+            return {
+                "latitude": float(location["lat"]),
+                "longitude": float(location["lng"]),
+                "country_code": country_code,
+                "country_name": country_name,
+                "display_name": result.get("formatted_address", city_norm),
+            }
+
+        # Cache successful geocodes aggressively
+        return await cache.get_or_set("geocode_city_google", _fetch, 86400, city_norm)
+    except Exception as exc:
+        logger.warning("google-geocoding-failed", city=city, error=str(exc))
+        return None
+
+
 async def _geocode_city_full(city: str) -> Optional[Dict[str, Any]]:
     """
-    Resolve a city/area name into lat/lon and country using Nominatim (OSM).
-    
+    Resolve a city/area name into lat/lon and country.
+
+    Tries Google Geocoding API first (more accurate, especially for Spanish cities),
+    falls back to Nominatim (OpenStreetMap) if Google is not configured or fails.
+
     Returns:
         Dict with latitude, longitude, country_code, country_name, display_name
         or None if geocoding failed.
@@ -76,17 +165,24 @@ async def _geocode_city_full(city: str) -> Optional[Dict[str, Any]]:
     if not city or not city.strip():
         return None
 
+    # Try Google Geocoding API first (preferred for accuracy)
+    google_result = await _geocode_city_google(city)
+    if google_result:
+        return google_result
+
+    # Fallback to Nominatim (OpenStreetMap)
+    logger.debug("falling-back-to-nominatim", city=city)
+
     url = "https://nominatim.openstreetmap.org/search"
     params = {
         "q": city,
         "format": "json",
         "limit": 1,
         "addressdetails": 1,  # Include address breakdown with country
+        "countrycodes": "es",  # Bias towards Spain for better Spanish city results
     }
     try:
-        settings = get_settings()
         cache = await get_cache_manager()
-
         city_norm = city.strip()
 
         async def _fetch() -> Optional[Dict[str, Any]]:
@@ -103,6 +199,13 @@ async def _geocode_city_full(city: str) -> Optional[Dict[str, Any]]:
             # Extract country code (Nominatim returns it in address.country_code)
             country_code = address.get("country_code", "").upper()
             country_name = address.get("country", "")
+
+            logger.info(
+                "nominatim-geocoding-success",
+                city=city,
+                country_code=country_code,
+                country_name=country_name,
+            )
 
             return {
                 "latitude": float(item["lat"]),

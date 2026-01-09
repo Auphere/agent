@@ -507,14 +507,40 @@ async def stream_agent_response(
             "✨ Finalizando recomendaciones...",
         ]
         progress_idx = 0
-        # Heartbeat loop: keep UI alive during slow LLM/tool stages.
-        while not agent_task.done():
-            await asyncio.sleep(3)
-            msg = progress_messages[progress_idx % len(progress_messages)]
-            progress_idx += 1
-            yield f"event: status\ndata: {json.dumps({'content': msg})}\n\n"
 
-        agent_result = await agent_task
+        # Heartbeat loop: keep UI alive during slow LLM/tool stages.
+        # CRITICAL: Wrap in try/except to detect client disconnection
+        try:
+            while not agent_task.done():
+                await asyncio.sleep(3)
+                msg = progress_messages[progress_idx % len(progress_messages)]
+                progress_idx += 1
+
+                # Yield heartbeat - this will raise exception if client disconnected
+                try:
+                    yield f"event: status\ndata: {json.dumps({'content': msg})}\n\n"
+                except (GeneratorExit, StopAsyncIteration, ConnectionError, BrokenPipeError) as e:
+                    # Client disconnected (stop button clicked)
+                    logger.info(
+                        "client-disconnected-cancelling-agent",
+                        query_id=query_id,
+                        exception_type=type(e).__name__,
+                    )
+                    # Cancel the running agent task
+                    agent_task.cancel()
+                    try:
+                        await agent_task
+                    except asyncio.CancelledError:
+                        logger.info("agent-task-cancelled-successfully", query_id=query_id)
+                    raise  # Re-raise to stop the generator
+
+            agent_result = await agent_task
+
+        except asyncio.CancelledError:
+            # Task was cancelled (likely due to client disconnect)
+            logger.info("agent-execution-cancelled", query_id=query_id)
+            yield f"event: error\ndata: {json.dumps({'content': '❌ Operación cancelada por el usuario'})}\n\n"
+            return
         track_stage_timing(
             stage="agent_execution",
             latency_ms=(perf_counter() - t_exec0) * 1000,
@@ -687,6 +713,37 @@ async def stream_agent_response(
         yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
 
 
+async def _disconnect_aware_stream(generator: AsyncGenerator[str, None], query_id: str):
+    """
+    Wrapper to detect client disconnection and properly cleanup the generator.
+
+    This ensures that when the stop button is clicked, the backend actually stops.
+    """
+    try:
+        async for event in generator:
+            try:
+                yield event
+            except (GeneratorExit, StopAsyncIteration, ConnectionError, BrokenPipeError) as e:
+                # Client disconnected - close the generator
+                logger.info(
+                    "client-disconnected-closing-stream",
+                    query_id=query_id,
+                    exception_type=type(e).__name__,
+                )
+                try:
+                    await generator.aclose()
+                except Exception:
+                    pass
+                raise  # Stop yielding
+    except Exception as e:
+        logger.warning("stream-interrupted", query_id=query_id, error=str(e))
+        # Ensure generator is closed
+        try:
+            await generator.aclose()
+        except Exception:
+            pass
+
+
 @router.post("/query/stream")
 async def query_agent_stream(
     request: QueryRequest,
@@ -700,7 +757,7 @@ async def query_agent_stream(
 ):
     """
     Stream agent response with real-time reasoning steps.
-    
+
     Returns Server-Sent Events (SSE) with:
     - status: Processing updates
     - thought: Agent reasoning
@@ -708,18 +765,25 @@ async def query_agent_stream(
     - observation: Tool results
     - token: Response text
     - end: Final response
+
+    STOP BUTTON: Client can abort by closing the EventSource connection.
+    The server will detect the disconnection and cancel the running agent task.
     """
+    query_id = str(uuid4())
+
+    generator = stream_agent_response(
+        request,
+        validator,
+        classifier,
+        llm_router,
+        conversation_repo,
+        chat_repo,
+        memory_manager,
+        translator,
+    )
+
     return StreamingResponse(
-        stream_agent_response(
-            request,
-            validator,
-            classifier,
-            llm_router,
-            conversation_repo,
-            chat_repo,
-            memory_manager,
-            translator,
-        ),
+        _disconnect_aware_stream(generator, query_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
