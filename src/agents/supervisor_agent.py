@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from time import perf_counter
 from typing import Any, Dict
 
@@ -187,25 +188,43 @@ class SupervisorAgent:
             return await self._get_search_agent().run(query, language, context)
             
         elif intent == IntentType.PLAN:
-            # Default: fast deterministic plan for latency + robustness.
-            # Slow Plan-and-Execute can be enabled via context flag for premium flows.
-            use_slow_plan = bool(context.get("use_slow_plan"))
-            if use_slow_plan:
-                self.logger.info("routing-to-plan-and-execute-agent")
-            else:
+            # PHASE 1.3: Cost control - Check token budget before routing
+            session_context = context.get("session_context", {})
+            session_tokens = session_context.get("total_tokens_used", 0)
+            MAX_TOKENS_PER_SESSION = 100000  # ~$1.00 at current rates
+
+            # Emergency rollback mechanism: Set AUPHERE_USE_FAST_PLAN_DEFAULT=true to revert to FastPlan
+            use_fast_default = os.getenv("AUPHERE_USE_FAST_PLAN_DEFAULT", "false").lower() == "true"
+
+            # Default: sophisticated Plan-and-Execute for personalization.
+            # Fast deterministic plan available via context flag or environment variable for rollback.
+            use_fast_plan = use_fast_default or bool(context.get("use_fast_plan"))
+
+            # Fallback to FastPlanAgent if token budget exceeded
+            if session_tokens > MAX_TOKENS_PER_SESSION:
+                self.logger.warning(
+                    "token-budget-exceeded",
+                    session_id=context.get("session_id"),
+                    tokens_used=session_tokens,
+                )
+                use_fast_plan = True
+
+            if use_fast_plan:
                 self.logger.info("routing-to-fast-plan-agent")
-            
+            else:
+                self.logger.info("routing-to-plan-and-execute-agent")
+
             # Extract session_id and plan_params from context
             session_id = context.get("session_id")
             plan_params = context.get("plan_params", {})
 
-            # Apply a tighter per-agent timeout for PLAN so we never burn the full 180s.
-            # FastPlan should complete well under this; slow plan may time out and fall back.
-            plan_timeout = min(30.0, float(self.settings.agent_max_execution_time))
+            # PHASE 1.2: Increased timeout for PlanAndExecuteAgent (60-90s typical execution time)
+            # PlanAndExecuteAgent needs more time for: planner (60s) + executor (90s) + synthesis
+            plan_timeout = min(120.0, float(self.settings.agent_max_execution_time))
 
-            if use_slow_plan:
+            if use_fast_plan:
                 return await asyncio.wait_for(
-                    self._get_plan_and_execute_agent().run(
+                    self._get_fast_plan_agent().run(
                         query=query,
                         language=language,
                         session_id=session_id,
@@ -216,7 +235,7 @@ class SupervisorAgent:
                 )
 
             return await asyncio.wait_for(
-                self._get_fast_plan_agent().run(
+                self._get_plan_and_execute_agent().run(
                     query=query,
                     language=language,
                     session_id=session_id,
