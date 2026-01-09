@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from src.config.settings import Settings, get_settings
+from src.tools.search.geocoding import resolve_country_from_location, check_coverage
 from src.utils.logger import get_logger
 
 
@@ -119,20 +120,41 @@ def normalize_query(query: str) -> tuple[str, Optional[str]]:
     """
     query_clean = query.strip()
     query_lower = query_clean.lower()
-    
+
+    detected_types = detect_place_types(query_lower)
+
     # Check exact match first (e.g., "bares", "bar")
     if query_lower in TERM_MAPPING:
         api_term = TERM_MAPPING[query_lower]
         return api_term, api_term
-    
-    # If query contains a known keyword, keep the original query for the search
-    # but still return the detected place type for filtering.
-    for spanish_term, api_term in TERM_MAPPING.items():
-        if spanish_term in query_lower:
-            return query_clean, api_term
-    
-    # No match found, return original
+
+    # If query contains exactly ONE known category keyword, keep original query (preserve modifiers)
+    # and return the detected type for filtering.
+    if len(detected_types) == 1:
+        return query_clean, detected_types[0]
+
+    # If query mentions multiple categories (e.g., "parques ... cafeterías"),
+    # DO NOT force a single type filter — it can zero out results.
     return query_clean, None
+
+
+def detect_place_types(query_lower: str) -> list[str]:
+    """
+    Best-effort detection of place categories mentioned in the query.
+
+    Returns a stable-ordered list of API place types (e.g., ["park", "cafe"]).
+    """
+    if not query_lower:
+        return []
+
+    seen: set[str] = set()
+    detected: list[str] = []
+    for spanish_term, api_term in TERM_MAPPING.items():
+        if spanish_term and spanish_term in query_lower:
+            if api_term not in seen:
+                seen.add(api_term)
+                detected.append(api_term)
+    return detected
 
 
 class PlaceResult(BaseModel):
@@ -194,8 +216,9 @@ class PlaceSearchTool:
         """
         # Normalize query (translate Spanish → English API terms)
         normalized_query, detected_type = normalize_query(query)
-        
-        # Use detected type if no explicit type provided
+        detected_types = detect_place_types(query.strip().lower())
+
+        # Use detected type if no explicit type provided (ONLY when unambiguous)
         if place_type is None:
             place_type = detected_type
         
@@ -224,40 +247,67 @@ class PlaceSearchTool:
             normalized_query=normalized_query,
             place_type=place_type,
             city=city,
-            has_location=bool(lat and lon),
+            has_location=(lat is not None and lon is not None),
         )
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    f"{self.base_url}/places/search",
-                    params=params,
-                )
-                response.raise_for_status()
-                data = response.json()
+            async def _request(search_params: Dict[str, Any]) -> Dict[str, Any]:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(
+                        f"{self.base_url}/places/search",
+                        params=search_params,
+                    )
+                    response.raise_for_status()
+                    return response.json()
 
-                # auphere-places may return:
-                # - FrontendSearchResponse: { places: [...] }
-                # - SearchResponse (DB fallback): { data: [...] }
-                places_data = data.get("places")
+            data = await _request(params)
+
+            # auphere-places may return:
+            # - FrontendSearchResponse: { places: [...] }
+            # - SearchResponse (DB fallback): { data: [...] }
+            def _extract_places(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+                places_data = payload.get("places")
                 if places_data is None:
-                    places_data = data.get("data", [])
-                
-                # Convert to PlaceResult objects
-                places = []
-                for place_dict in places_data:
+                    places_data = payload.get("data", [])
+                return places_data or []
+
+            def _parse_places(raw_places: List[Dict[str, Any]]) -> List[PlaceResult]:
+                parsed: List[PlaceResult] = []
+                for place_dict in raw_places:
                     try:
-                        places.append(PlaceResult(**place_dict))
+                        parsed.append(PlaceResult(**place_dict))
                     except Exception as parse_error:
                         self.logger.warning(
                             "failed-to-parse-place",
                             place_name=place_dict.get("name", "unknown"),
                             error=str(parse_error),
                         )
-                        continue
-                
-                self.logger.info("places-found", count=len(places))
-                return places
+                return parsed
+
+            places = _parse_places(_extract_places(data))
+
+            # Retry strategy (only when search returns empty but we detected categories):
+            # - If the user query is broad (e.g., "lugares románticos...") the upstream service
+            #   may return 0. In that case, retry using detected type keywords as q/type.
+            if not places and detected_types:
+                for retry_type in detected_types[:3]:
+                    retry_params = dict(params)
+                    retry_params["q"] = retry_type
+                    retry_params["type"] = retry_type
+                    self.logger.info(
+                        "places-search-retry",
+                        reason="empty_results_using_detected_type",
+                        retry_type=retry_type,
+                        city=city,
+                        has_location=(lat is not None and lon is not None),
+                    )
+                    retry_data = await _request(retry_params)
+                    places = _parse_places(_extract_places(retry_data))
+                    if places:
+                        break
+
+            self.logger.info("places-found", count=len(places))
+            return places
 
         except httpx.HTTPStatusError as exc:
             self.logger.error(
@@ -332,6 +382,33 @@ async def places_search_tool(
     """
     tool_instance = PlaceSearchTool()
     try:
+        # MVP Coverage enforcement (global): block searches outside configured coverage.
+        settings = get_settings()
+        if settings.coverage_enabled and settings.coverage_countries_list:
+            country = await resolve_country_from_location(
+                city=city,
+                latitude=latitude,
+                longitude=longitude,
+            )
+            if country and country.get("country_code"):
+                is_covered, _ = check_coverage(country["country_code"])
+                if not is_covered:
+                    return {
+                        "success": False,
+                        "places": [],
+                        "count": 0,
+                        "query": query,
+                        "location": {"lat": latitude, "lon": longitude, "lng": longitude}
+                        if latitude is not None and longitude is not None
+                        else None,
+                        "error": "OUTSIDE_COVERAGE",
+                        "coverage": {
+                            "country_code": country["country_code"],
+                            "country_name": country.get("country_name", ""),
+                            "allowed_countries": settings.coverage_countries_list,
+                        },
+                    }
+
         radius_km = max(1, int(round(radius_meters / 1000)))
         places = await tool_instance.search_places(
             query=query,
@@ -396,6 +473,25 @@ async def places_get_place_tool(place_id: str) -> dict:
         # Convert to a minimal normalized place (compatible with google_places_tool output)
         lat = place_obj.get("latitude")
         lon = place_obj.get("longitude")
+
+        # MVP Coverage enforcement (global): block details outside coverage.
+        settings = get_settings()
+        if settings.coverage_enabled and settings.coverage_countries_list and lat is not None and lon is not None:
+            country = await resolve_country_from_location(latitude=float(lat), longitude=float(lon))
+            if country and country.get("country_code"):
+                is_covered, _ = check_coverage(country["country_code"])
+                if not is_covered:
+                    return {
+                        "success": False,
+                        "error": "OUTSIDE_COVERAGE",
+                        "place_id": place_id,
+                        "coverage": {
+                            "country_code": country["country_code"],
+                            "country_name": country.get("country_name", ""),
+                            "allowed_countries": settings.coverage_countries_list,
+                        },
+                    }
+
         normalized = {
             "id": place_obj.get("google_place_id") or place_id,
             "name": place_obj.get("name"),

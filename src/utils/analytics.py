@@ -99,9 +99,8 @@ def is_analytics_enabled() -> bool:
 
 def _log_event_local(event_name: str, user_id: Optional[str], properties: Dict[str, Any]) -> None:
     """Log event to console in development mode."""
-    logger.debug(
-        "analytics-event",
-        event=event_name,
+    logger.info(
+        f"📊 analytics-event: {event_name}",
         user_id=user_id or "anonymous",
         properties=properties,
     )
@@ -160,6 +159,8 @@ def track_agent_invoked(
     user_id: Optional[str] = None,
     query_length: int = 0,
     language: str = "unknown",
+    query_id: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> None:
     """Track agent invocation."""
     track_event(
@@ -171,6 +172,8 @@ def track_agent_invoked(
             'intent': intent,
             'query_length': query_length,
             'language': language,
+            'query_id': query_id,
+            'request_id': request_id,
         },
     )
 
@@ -181,6 +184,7 @@ def track_llm_request(
     temperature: float,
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track LLM request (before call)."""
     track_event(
@@ -191,6 +195,7 @@ def track_llm_request(
             'tokens_in': tokens_in,
             'temperature': temperature,
             'session_id': session_id,
+            'query_id': query_id,
         },
     )
 
@@ -204,6 +209,7 @@ def track_llm_response(
     error: Optional[str] = None,
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track LLM response (after call)."""
     track_event(
@@ -217,6 +223,7 @@ def track_llm_response(
             'success': success,
             'error': error,
             'session_id': session_id,
+            'query_id': query_id,
         },
     )
 
@@ -228,6 +235,7 @@ def track_tool_called(
     error: Optional[str] = None,
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track tool call execution."""
     track_event(
@@ -239,6 +247,7 @@ def track_tool_called(
             'latency_ms': latency_ms,
             'error': error,
             'session_id': session_id,
+            'query_id': query_id,
         },
     )
 
@@ -251,6 +260,7 @@ def track_plan_generated(
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
     latency_ms: Optional[float] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track plan generation."""
     track_event(
@@ -263,6 +273,7 @@ def track_plan_generated(
             'budget': budget,
             'session_id': session_id,
             'latency_ms': latency_ms,
+            'query_id': query_id,
         },
     )
 
@@ -290,6 +301,7 @@ def track_language_detected(
     is_supported: bool,
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track language detection."""
     track_event(
@@ -299,6 +311,7 @@ def track_language_detected(
             'detected_lang': detected_lang,
             'is_supported': is_supported,
             'session_id': session_id,
+            'query_id': query_id,
         },
     )
 
@@ -367,6 +380,7 @@ def track_agent_error(
     error_message: str,
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Track agent error."""
     track_event(
@@ -377,6 +391,61 @@ def track_agent_error(
             'error_type': error_type,
             'error_message': error_message,
             'session_id': session_id,
+            'query_id': query_id,
+        },
+    )
+
+
+def track_stage_timing(
+    *,
+    stage: str,
+    latency_ms: float,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
+    agent_type: Optional[str] = None,
+    intent: Optional[str] = None,
+) -> None:
+    """Track timing for a single pipeline stage (for latency breakdown)."""
+    track_event(
+        "agent_stage_timing",
+        user_id=user_id,
+        properties={
+            "stage": stage,
+            "latency_ms": float(latency_ms),
+            "session_id": session_id,
+            "query_id": query_id,
+            "agent_type": agent_type,
+            "intent": intent,
+        },
+    )
+
+
+def track_agent_degraded(
+    *,
+    reason: str,
+    total_ms: float,
+    has_partial_plan: bool,
+    steps_completed: Optional[int] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    query_id: Optional[str] = None,
+    agent_type: Optional[str] = None,
+    intent: Optional[str] = None,
+) -> None:
+    """Track when the agent degrades (e.g., timeout -> partial plan)."""
+    track_event(
+        "agent_degraded",
+        user_id=user_id,
+        properties={
+            "reason": reason,
+            "total_ms": float(total_ms),
+            "has_partial_plan": bool(has_partial_plan),
+            "steps_completed": steps_completed,
+            "session_id": session_id,
+            "query_id": query_id,
+            "agent_type": agent_type,
+            "intent": intent,
         },
     )
 

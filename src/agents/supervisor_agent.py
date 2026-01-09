@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any, Dict
 
 from src.agents.react_agent import ReactAgent  # Fallback
-from src.agents.specialized import RecommendAgent, SearchAgent
+from src.agents.specialized import RecommendAgent, SearchAgent, FastPlanAgent
 from src.agents.specialized.plan_and_execute_agent import PlanAndExecuteAgent
 from src.classifiers.models import IntentType
 from src.config.settings import Settings, get_settings
@@ -40,6 +40,7 @@ class SupervisorAgent:
         # Lazy-initialized agents (only created when needed)
         self._search_agent = None
         self._plan_and_execute_agent = None
+        self._fast_plan_agent = None
         self._recommend_agent = None
         self._fallback_agent = None
         
@@ -56,6 +57,12 @@ class SupervisorAgent:
         if self._plan_and_execute_agent is None:
             self._plan_and_execute_agent = PlanAndExecuteAgent(settings=self.settings)
         return self._plan_and_execute_agent
+
+    def _get_fast_plan_agent(self) -> FastPlanAgent:
+        """Lazy initialization of deterministic FastPlanAgent (default PLAN path)."""
+        if self._fast_plan_agent is None:
+            self._fast_plan_agent = FastPlanAgent(settings=self.settings)
+        return self._fast_plan_agent
     
     def _get_recommend_agent(self) -> RecommendAgent:
         """Lazy initialization of RecommendAgent."""
@@ -180,19 +187,43 @@ class SupervisorAgent:
             return await self._get_search_agent().run(query, language, context)
             
         elif intent == IntentType.PLAN:
-            # Use new Plan-and-Execute agent for better quality
-            self.logger.info("routing-to-plan-and-execute-agent")
+            # Default: fast deterministic plan for latency + robustness.
+            # Slow Plan-and-Execute can be enabled via context flag for premium flows.
+            use_slow_plan = bool(context.get("use_slow_plan"))
+            if use_slow_plan:
+                self.logger.info("routing-to-plan-and-execute-agent")
+            else:
+                self.logger.info("routing-to-fast-plan-agent")
             
             # Extract session_id and plan_params from context
             session_id = context.get("session_id")
             plan_params = context.get("plan_params", {})
-            
-            return await self._get_plan_and_execute_agent().run(
-                query=query,
-                language=language,
-                session_id=session_id,
-                plan_params=plan_params,
-                context=context
+
+            # Apply a tighter per-agent timeout for PLAN so we never burn the full 180s.
+            # FastPlan should complete well under this; slow plan may time out and fall back.
+            plan_timeout = min(30.0, float(self.settings.agent_max_execution_time))
+
+            if use_slow_plan:
+                return await asyncio.wait_for(
+                    self._get_plan_and_execute_agent().run(
+                        query=query,
+                        language=language,
+                        session_id=session_id,
+                        plan_params=plan_params,
+                        context=context,
+                    ),
+                    timeout=plan_timeout,
+                )
+
+            return await asyncio.wait_for(
+                self._get_fast_plan_agent().run(
+                    query=query,
+                    language=language,
+                    session_id=session_id,
+                    plan_params=plan_params,
+                    context=context,
+                ),
+                timeout=plan_timeout,
             )
             
         elif intent == IntentType.RECOMMEND:
@@ -218,6 +249,44 @@ class SupervisorAgent:
         self.logger.info("attempting-fallback-after-timeout", intent=intent.value)
         
         try:
+            # For PLAN: attempt to return the last partial plan from LangGraph checkpoints.
+            # This avoids throwing away useful work when we time out near the end.
+            if intent == IntentType.PLAN:
+                session_id = context.get("session_id")
+                if session_id:
+                    try:
+                        plan_agent = self._get_plan_and_execute_agent()
+                        checkpoint = await plan_agent.get_last_checkpoint(str(session_id))
+                        if checkpoint and checkpoint.get("plan"):
+                            self.logger.info(
+                                "returning-partial-plan-after-timeout",
+                                session_id=str(session_id),
+                                has_places=bool(checkpoint.get("places")),
+                            )
+                            return {
+                                "response_text": (
+                                    "El plan tardó más de lo esperado, pero aquí tienes lo que ya quedó armado."
+                                    if str(language).startswith("es")
+                                    else "The plan took longer than expected, but here is what’s already ready."
+                                ),
+                                "places": checkpoint.get("places", []) or [],
+                                "plan": checkpoint.get("plan"),
+                                "tool_calls": 0,
+                                "reasoning_steps": 0,
+                                "agent_type": "plan_partial",
+                                "model_used": "gpt-4o + gpt-4o-mini",
+                                "routed_to": "plan_partial_after_timeout",
+                                "intent": intent.value,
+                                "fallback_reason": "Primary agent timed out; returned last checkpoint",
+                                "plan_params": checkpoint.get("plan_params") or {},
+                            }
+                    except Exception as exc:
+                        self.logger.warning(
+                            "partial-plan-recovery-failed",
+                            session_id=str(session_id),
+                            error=str(exc),
+                        )
+
             # Use shorter timeout for fallback (60s)
             fallback_timeout = min(60.0, self.settings.agent_max_execution_time / 2)
             

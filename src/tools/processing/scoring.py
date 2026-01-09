@@ -50,10 +50,69 @@ class ScoringWeights(BaseModel):
     preferences: float = 0.05
 
 
+def _safe_lower(value: Any) -> str:
+    """Best-effort lowercase conversion to avoid crashes on non-string fields."""
+    if value is None:
+        return ""
+    try:
+        return str(value).strip().lower()
+    except Exception:
+        return ""
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort float conversion to avoid crashes on None/non-numeric fields."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _budget_to_price_target(budget: Any) -> int:
+    """
+    Map budget to a price level target (1-4).
+
+    Supports:
+    - strings: "low|medium|high|luxury" (+ Spanish aliases)
+    - numeric: budget_per_person in euros (heuristic buckets)
+    """
+    budget_map = {
+        "low": 1,
+        "economic": 1,
+        "economico": 1,
+        "económico": 1,
+        "medium": 2,
+        "medio": 2,
+        "high": 3,
+        "alto": 3,
+        "luxury": 4,
+        "lujo": 4,
+    }
+
+    if isinstance(budget, str):
+        return budget_map.get(_safe_lower(budget), 2)
+
+    # Numeric budget_per_person (EUR) heuristic buckets.
+    try:
+        b = float(budget)
+    except Exception:
+        return 2
+
+    if b <= 20:
+        return 1
+    if b <= 45:
+        return 2
+    if b <= 90:
+        return 3
+    return 4
+
+
 def _score_rating(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on rating (0-1)."""
-    rating = place.get("rating", 0)
-    if rating == 0:
+    rating = _safe_float(place.get("rating"), default=0.0)
+    if rating <= 0:
         return 0.5  # Unknown rating, neutral score
     
     # Normalize to 0-1 (rating is typically 0-5)
@@ -67,24 +126,14 @@ def _score_price(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
         price_level = place.get("price_level")
     budget = requirements.get("budget", "medium")
     
-    # Map budget to price level (1-4)
-    budget_map = {
-        "low": 1,
-        "economic": 1,
-        "economico": 1,
-        "medium": 2,
-        "medio": 2,
-        "high": 3,
-        "alto": 3,
-        "luxury": 4,
-        "lujo": 4,
-    }
-    
     if price_level is None:
         return 0.5  # Unknown price, neutral score
-    
-    target_price = budget_map.get(budget.lower(), 2)
-    difference = abs(price_level - target_price)
+
+    target_price = _budget_to_price_target(budget)
+    try:
+        difference = abs(int(price_level) - int(target_price))
+    except Exception:
+        return 0.5
     
     # Score: 1.0 for exact match, decreases with difference
     return max(0, 1.0 - (difference * 0.3))
@@ -101,9 +150,13 @@ def _score_distance(place: Dict[str, Any], requirements: Dict[str, Any]) -> floa
         return 0.5
     
     # Simple distance calculation (not accurate, but good enough for ranking)
-    lat_diff = abs(place_location.get("lat", 0) - user_location.get("lat", 0))
-    lon_val = place_location.get("lon", place_location.get("lng", 0))
-    lon_diff = abs(lon_val - user_location.get("lon", user_location.get("lng", 0)))
+    place_lat = _safe_float(place_location.get("lat"), default=0.0)
+    user_lat = _safe_float(user_location.get("lat"), default=0.0)
+    place_lon = _safe_float(place_location.get("lon", place_location.get("lng")), default=0.0)
+    user_lon = _safe_float(user_location.get("lon", user_location.get("lng")), default=0.0)
+
+    lat_diff = abs(place_lat - user_lat)
+    lon_diff = abs(place_lon - user_lon)
     distance = (lat_diff ** 2 + lon_diff ** 2) ** 0.5
     
     # Score: 1.0 for very close, decreases with distance
@@ -114,17 +167,17 @@ def _score_distance(place: Dict[str, Any], requirements: Dict[str, Any]) -> floa
 
 def _score_vibe(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
     """Score based on vibe/atmosphere match (0-1)."""
-    desired_vibe = (requirements.get("vibe") or "").strip().lower()
+    desired_vibe = _safe_lower(requirements.get("vibe"))
     if not desired_vibe and isinstance(requirements.get("vibes"), list):
         # Accept plan-style requirements where vibes is a list.
-        desired_vibe = str((requirements.get("vibes") or [""])[0]).strip().lower()
+        desired_vibe = _safe_lower((requirements.get("vibes") or [""])[0])
     if not desired_vibe:
         return 0.5  # No vibe preference, neutral score
     
     # Check place types/categories
     place_types = place.get("types", [])
-    place_name = place.get("name", "").lower()
-    place_description = place.get("description", "").lower()
+    place_name = _safe_lower(place.get("name"))
+    place_description = _safe_lower(place.get("description"))
     
     # Vibe matching keywords
     vibe_keywords = {
@@ -148,7 +201,7 @@ def _score_vibe(place: Dict[str, Any], requirements: Dict[str, Any]) -> float:
         if keyword in place_name or keyword in place_description:
             matches += 1
         for ptype in place_types:
-            if keyword in ptype.lower():
+            if keyword in _safe_lower(ptype):
                 matches += 1
     
     return min(matches * 0.3, 1.0)

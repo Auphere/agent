@@ -200,9 +200,19 @@ TRACE_LEVEL=debug
 |----------|-------------|-----------|-------------------|
 | `POSTHOG_ENABLED` | Habilitar PostHog | ⚠️ | `false` |
 | `POSTHOG_API_KEY` | Project API Key (solo producción) | ⚠️ | - |
-| `POSTHOG_HOST` | Host de PostHog | ⚠️ | `https://app.posthog.com` |
+| `POSTHOG_HOST` | Host de PostHog | ⚠️ | `https://eu.i.posthog.com` |
 
 > **Nota:** En desarrollo (`ENVIRONMENT=development`), PostHog usa console logging. En producción, envía a PostHog Cloud.
+
+### **Cobertura geográfica (MVP)**
+
+Durante el MVP podemos limitar búsquedas/recomendaciones/planes a un conjunto de países para evitar resultados inconsistentes mientras se completa la cobertura de datos.
+
+| Variable | Descripción | Default |
+|---|---|---|
+| `COVERAGE_ENABLED` | Habilita la política de cobertura | `true` |
+| `COVERAGE_COUNTRIES` | Lista CSV de países permitidos (ISO alpha‑2) | `ES` |
+| `COVERAGE_POLICY_NOTE` | Nota interna (no user-facing) para que el LLM redacte una respuesta friendly cuando esté fuera de cobertura | (ver `settings.py`) |
 
 ---
 

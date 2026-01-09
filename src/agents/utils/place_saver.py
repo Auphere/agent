@@ -12,6 +12,7 @@ from src.utils.logger import get_logger
 async def save_places_to_db(
     places: List[Dict[str, Any]],
     settings: Optional[Settings] = None,
+    fallback_city: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Save or update places in the Rust Places database.
@@ -37,10 +38,24 @@ async def save_places_to_db(
     places_api_url = settings.places_api_url.rstrip("/")
     upsert_endpoint = f"{places_api_url}/places/upsert"
     
-    saved_places = []
+    # Deduplicate input to avoid repeated upserts and duplicate logs.
+    deduped: List[Dict[str, Any]] = []
+    seen_google_ids: set[str] = set()
+    for place in places:
+        google_place_id = place.get("place_id") or place.get("id")
+        if not google_place_id:
+            deduped.append(place)
+            continue
+        gid = str(google_place_id)
+        if gid in seen_google_ids:
+            continue
+        seen_google_ids.add(gid)
+        deduped.append(place)
+
+    saved_places: List[Dict[str, Any]] = []
     
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for place in places:
+        for place in deduped:
             try:
                 # Skip if no google_place_id
                 google_place_id = place.get("place_id") or place.get("id")
@@ -73,28 +88,47 @@ async def save_places_to_db(
                 if place.get("vibe"):
                     main_categories.extend(place["vibe"][:2])
                 
-                # Extract city and district from address or neighborhood
-                address = place.get("address", "")
+                # Extract city and district from multiple possible shapes.
+                address = place.get("address", "") or ""
                 neighborhood = place.get("neighborhood")
-                
-                # Extract city from address (usually last part before country)
-                city = "Madrid"  # Default fallback
-                if address:
-                    parts = [p.strip() for p in address.split(",")]
-                    # Usually format: "Street, Number, District, PostalCode City, Country"
-                    # City is usually second-to-last (index -2)
-                    if len(parts) >= 2:
-                        # Try to extract city from address
-                        city_part = parts[-2] if len(parts) > 2 else parts[-1]
-                        # Remove postal code if present (e.g., "28009 Madrid" -> "Madrid")
-                        city = city_part.split()[-1] if city_part.split() else "Madrid"
-                
-                # Use neighborhood if available, otherwise extract from address
-                district = neighborhood
+
+                # Places service search responses may store city/district under customAttributes.
+                custom_attrs = place.get("customAttributes") or place.get("custom_attributes") or {}
+                city = (
+                    place.get("city")
+                    or (custom_attrs.get("city") if isinstance(custom_attrs, dict) else None)
+                    or fallback_city
+                )
+
+                # Best-effort parse city from address if still missing
+                if not city and address:
+                    parts = [p.strip() for p in address.split(",") if p.strip()]
+                    if parts:
+                        # Common formats: "... , Zaragoza, España" or "... , 50001 Zaragoza, España"
+                        candidate = parts[-2] if len(parts) >= 2 else parts[-1]
+                        token = candidate.split()[-1] if candidate.split() else None
+                        if token and token.isalpha():
+                            city = token
+
+                district = (
+                    neighborhood
+                    or (custom_attrs.get("district") if isinstance(custom_attrs, dict) else None)
+                )
                 if not district and address:
-                    parts = [p.strip() for p in address.split(",")]
+                    parts = [p.strip() for p in address.split(",") if p.strip()]
                     if len(parts) >= 3:
-                        district = parts[2]  # District is usually 3rd part
+                        district = parts[2]
+
+                # City is required by auphere-places CreatePlaceRequest. If we can't determine it,
+                # skip saving to DB to avoid corrupting data.
+                if not city:
+                    logger.warning(
+                        "place-save-skipped-missing-city",
+                        place_name=place.get("name"),
+                        google_id=google_place_id,
+                    )
+                    saved_places.append(place)
+                    continue
                 
                 # Build request
                 request_body = {
@@ -103,7 +137,7 @@ async def save_places_to_db(
                     "type": place_type,
                     "location": [lon, lat],  # [longitude, latitude]
                     "address": address,
-                    "city": city,
+                    "city": str(city),
                     "district": district,
                     "phone": place.get("phone"),
                     "website": place.get("website"),

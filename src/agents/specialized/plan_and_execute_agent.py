@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import operator
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Dict, List, Optional, TypedDict, Annotated, Sequence
 from uuid import uuid4
@@ -93,6 +94,8 @@ class PlanExecuteState(TypedDict, total=False):
     input: str
     language: str
     session_id: str  # Used as thread_id for checkpointing
+    # Monotonic deadline used to avoid expensive last-mile synthesis near the Supervisor timeout
+    deadline_ts: float
     
     # ✅ CRITICAL: Plan parameters with custom reducer for accumulation
     # This allows parameters to persist and accumulate across conversation turns
@@ -189,13 +192,20 @@ Be thorough and extract all relevant information.
 Focus on quality over quantity.
 
 CRITICAL TOOL USAGE RULES:
-- When calling `rank_by_score_tool`, you MUST pass:
-  - `places`: the EXACT list returned by the previous `places_search_tool` call (do not invent)
-  - `requirements`: a dict built from plan params (budget/vibe) and location if available:
-    - budget: "low" | "medium" | "high" (or a numeric budget_per_person if you have it)
-    - vibe: a short string like "cultural", "romantic", etc. (or omit if unknown)
-    - location: { "lat": number, "lon": number } when you have coordinates
-- Do not call `rank_by_score_tool` with partial args (it won't be able to rank).
+
+1. When calling `rank_by_score_tool`, you MUST pass:
+   - `places`: the EXACT list returned by the previous `places_search_tool` call (do not invent)
+   - `requirements`: a dict built from plan params (budget/vibe) and location if available:
+     - budget: "low" | "medium" | "high" (or a numeric budget_per_person if you have it)
+     - vibe: a short string like "cultural", "romantic", etc. (or omit if unknown)
+     - location: {{ "lat": number, "lon": number }} when you have coordinates
+   - Do not call `rank_by_score_tool` with partial args (it won't be able to rank).
+
+2. When calling `generate_plan_json_tool`, you MUST:
+   - Build the `stops` list from the places found in previous steps (REQUIRED, cannot be empty)
+   - Each stop must include: stopNumber, localId, name, category, timing, location, details, selectionReasons, actions
+   - Use the actual data from search results (coordinates, names, addresses)
+   - If no places were found, DO NOT call this tool - instead report that no suitable places were found
 """
 
 REPLANNER_PROMPT = """You are an expert replanner agent that adapts plans based on execution results.
@@ -243,8 +253,14 @@ If the executed steps contain "STOP:" or mention missing information:
 - **DO NOT list the places or stops in your text response.** The UI displays the plan card.
 - Your response should ONLY contain:
   1. A brief, engaging intro (1-2 sentences).
-  2. A "What to Expect" section (2-3 sentences).
-  3. A "Pro Tips" section (2-3 bullet points).
+  2. A section titled in the user's language:
+     - If Language is Spanish (`es`): title it **"Qué esperar"**
+     - Otherwise: title it **"What to Expect"**
+     (2-3 sentences).
+  3. A section titled in the user's language:
+     - If Language is Spanish (`es`): title it **"Consejos"**
+     - Otherwise: title it **"Pro Tips"**
+     (2-3 bullet points).
 - **DO NOT** repeat the itinerary, times, or addresses.
 """
 
@@ -392,6 +408,405 @@ class PlanAndExecuteAgent:
         
         self.logger.info("langgraph-initialized-with-postgres-checkpointer")
 
+    def _get_tool_by_name(self, name: str):
+        """Return a tool instance by its registered name."""
+        for tool in self.all_tools:
+            if getattr(tool, "name", None) == name:
+                return tool
+        return None
+
+    async def _ainvoke_tool(self, name: str, tool_args: Dict[str, Any]) -> Any:
+        """Safely call a registered LangChain tool by name."""
+        tool = self._get_tool_by_name(name)
+        if tool is None:
+            raise RuntimeError(f"Tool not found: {name}")
+        return await tool.ainvoke(tool_args)
+
+    @dataclass(frozen=True)
+    class _PlacePick:
+        """Internal normalized selection used to build stops deterministically."""
+        id: str
+        name: str
+        category: str
+        address: str
+        lat: float
+        lng: float
+        rating: Optional[float]
+        price_level: Optional[int]
+
+    @staticmethod
+    def _pick_category(place: Dict[str, Any]) -> str:
+        """Best-effort mapping from place types to plan categories."""
+        types = place.get("types") or []
+        primary = (place.get("primary_type") or (types[0] if types else "") or "").lower()
+        if "restaurant" in primary:
+            return "restaurant"
+        if "cafe" in primary or "coffee" in primary:
+            return "cafe"
+        if "bar" in primary or "pub" in primary:
+            return "bar"
+        if "park" in primary:
+            return "activity"
+        if "museum" in primary:
+            return "activity"
+        return "activity"
+
+    def _to_place_pick(self, place: Dict[str, Any]) -> Optional["_PlacePick"]:
+        """Convert a PlaceNormalized-like dict into a deterministic stop pick."""
+        loc = place.get("location") or {}
+        lat = loc.get("lat") or place.get("latitude")
+        lng = loc.get("lng") or place.get("longitude") or loc.get("lon")
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+        except Exception:
+            return None
+
+        place_id = str(place.get("id") or place.get("place_id") or "")
+        name = str(place.get("name") or "").strip()
+        if not place_id or not name:
+            return None
+
+        address = str(place.get("address") or "").strip()
+        category = self._pick_category(place)
+
+        rating_val = place.get("rating")
+        try:
+            rating_f = float(rating_val) if rating_val is not None else None
+        except Exception:
+            rating_f = None
+
+        price_val = place.get("price_level") or place.get("priceLevel")
+        try:
+            price_i = int(price_val) if price_val is not None else None
+        except Exception:
+            price_i = None
+
+        return PlanAndExecuteAgent._PlacePick(
+            id=place_id,
+            name=name,
+            category=category,
+            address=address,
+            lat=lat_f,
+            lng=lng_f,
+            rating=rating_f,
+            price_level=price_i,
+        )
+
+    def _build_stops_from_picks(
+        self,
+        picks: List["_PlacePick"],
+        vibes: List[str],
+        start_time: str = "TBD",
+    ) -> List[Dict[str, Any]]:
+        """Build generate_plan_json_tool-compatible stops deterministically."""
+        suggested_duration_by_category = {
+            "restaurant": 90,
+            "cafe": 60,
+            "bar": 60,
+            "activity": 90,
+        }
+
+        stops: List[Dict[str, Any]] = []
+        for idx, pick in enumerate(picks, start=1):
+            category = pick.category
+            duration = suggested_duration_by_category.get(category, 75)
+            recommended_start = start_time if idx == 1 else "TBD"
+
+            stops.append(
+                {
+                    "stopNumber": idx,
+                    "localId": pick.id,
+                    "name": pick.name,
+                    "category": category,
+                    "typeLabel": None,
+                    "timing": {
+                        "recommendedStart": recommended_start,
+                        "suggestedDurationMinutes": duration,
+                        "estimatedEnd": "TBD",
+                    },
+                    "location": {
+                        "address": pick.address,
+                        "lat": pick.lat,
+                        "lng": pick.lng,
+                        "travelTimeFromPreviousMinutes": 0 if idx == 1 else None,
+                    },
+                    "details": {
+                        "vibes": vibes,
+                        "targetAudience": "couple" if "romantic" in [v.lower() for v in vibes] else "general",
+                        "music": None,
+                        "noiseLevel": None,
+                        "averageSpendPerPerson": None,
+                        "rating": pick.rating,
+                        "priceLevel": pick.price_level,
+                    },
+                    "selectionReasons": [
+                        "Buena opción según el vibe solicitado."
+                    ],
+                    "actions": {
+                        "canReserve": None,
+                        "reservationUrl": None,
+                        "googleMapsUrl": None,
+                        "phone": None,
+                    },
+                    "alternatives": None,
+                    "personalTips": None,
+                    "images": None,
+                }
+            )
+
+        return stops
+
+    async def _fallback_build_plan_json(self, state: "PlanExecuteState") -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Deterministic fallback for the final step: re-search, rank, build stops, call generate_plan_json_tool.
+        Returns (plan_json, selected_places).
+        """
+        plan_params = state.get("plan_params", {}) or {}
+        city = plan_params.get("primary_city") or (plan_params.get("cities") or [None])[0]
+        city = str(city) if city else ""
+        if not city:
+            return None, []
+
+        vibes = plan_params.get("vibes") or []
+        if isinstance(vibes, str):
+            vibes = [vibes]
+        vibes = [str(v) for v in vibes if v]
+        if not vibes:
+            vibes = ["romantic"]
+
+        budget = plan_params.get("budget_per_person")
+        num_people = int(plan_params.get("num_people") or 2)
+
+        # Re-geocode for location bias when possible
+        origin = None
+        try:
+            geocode_raw = await self._ainvoke_tool("geocode_city_tool", {"city": city})
+            if isinstance(geocode_raw, str):
+                parsed = json.loads(geocode_raw)
+                if isinstance(parsed, dict) and parsed.get("ok") is True:
+                    origin = {"lat": float(parsed["latitude"]), "lon": float(parsed["longitude"])}
+        except Exception:
+            origin = None
+
+        # Search candidates (keep it simple and deterministic)
+        restaurant_query = "restaurantes románticos"
+        park_query = "parques románticos"
+        restaurants = await self._ainvoke_tool(
+            "places_search_tool",
+            {
+                "query": restaurant_query,
+                "city": city,
+                "latitude": origin["lat"] if origin else None,
+                "longitude": origin["lon"] if origin else None,
+                "max_results": 10,
+            },
+        )
+        parks = await self._ainvoke_tool(
+            "places_search_tool",
+            {
+                "query": park_query,
+                "city": city,
+                "latitude": origin["lat"] if origin else None,
+                "longitude": origin["lon"] if origin else None,
+                "max_results": 10,
+            },
+        )
+
+        def _extract_places(tool_result: Any) -> List[Dict[str, Any]]:
+            if isinstance(tool_result, dict):
+                return list(tool_result.get("places") or [])
+            if isinstance(tool_result, list):
+                return tool_result
+            return []
+
+        restaurant_places = _extract_places(restaurants)
+        park_places = _extract_places(parks)
+        candidates = restaurant_places + park_places
+
+        if not candidates:
+            return None, []
+
+        # Rank deterministically via tool (now hardened)
+        requirements: Dict[str, Any] = {"vibes": vibes, "budget": budget}
+        if origin:
+            requirements["location"] = origin
+        ranked = await self._ainvoke_tool(
+            "rank_by_score_tool",
+            {
+                "places": candidates,
+                "requirements": requirements,
+                "language": state.get("language", "es"),
+                "user_query": state.get("input", ""),
+                "requested_count": 5,
+            },
+        )
+
+        ranked_places: List[Dict[str, Any]] = []
+        if isinstance(ranked, dict) and not ranked.get("error"):
+            for item in ranked.get("ranked_places") or []:
+                if isinstance(item, dict) and isinstance(item.get("place"), dict):
+                    ranked_places.append(item["place"])
+        if not ranked_places:
+            ranked_places = candidates[:5]
+
+        # Pick stops: prefer 2 restaurants + 1 activity if possible.
+        picks: List[PlanAndExecuteAgent._PlacePick] = []
+        for p in ranked_places:
+            pick = self._to_place_pick(p)
+            if pick:
+                picks.append(pick)
+            if len(picks) >= 5:
+                break
+
+        if not picks:
+            return None, []
+
+        # Create a minimal but valid set of stops (3 stops for a "day" plan).
+        restaurants_picks = [p for p in picks if p.category == "restaurant"]
+        activity_picks = [p for p in picks if p.category == "activity"]
+        final_picks: List[PlanAndExecuteAgent._PlacePick] = []
+        if restaurants_picks:
+            final_picks.append(restaurants_picks[0])
+        if activity_picks:
+            final_picks.append(activity_picks[0])
+        if len(restaurants_picks) >= 2:
+            final_picks.append(restaurants_picks[1])
+        # Fill remaining if needed
+        for p in picks:
+            if len(final_picks) >= 3:
+                break
+            if p not in final_picks:
+                final_picks.append(p)
+
+        stops = self._build_stops_from_picks(final_picks, vibes=vibes, start_time="TBD")
+
+        title = f"Día romántico en {city}"
+        description = "Itinerario romántico con paradas seleccionadas por calidad y vibe."
+        category = "romantic"
+
+        plan_result = await self._ainvoke_tool(
+            "generate_plan_json_tool",
+            {
+                "title": title,
+                "description": description,
+                "category": category,
+                "vibes": vibes,
+                "date": "TBD",
+                "start_time": "TBD",
+                "city": city,
+                "group_size": num_people,
+                "stops": stops,
+                "total_duration_hours": 8.0,
+                "budget_per_person": float(budget) if budget is not None else None,
+                "user_max_budget_per_person": float(budget) if budget is not None else None,
+                "final_recommendations": [
+                    "Reserva con antelación si es fin de semana.",
+                    "Lleva calzado cómodo para caminar entre paradas.",
+                    "Si prefieres algo más tranquilo o más animado, puedo ajustar el plan.",
+                ],
+            },
+        )
+
+        if isinstance(plan_result, dict) and plan_result.get("success") is True and isinstance(plan_result.get("plan"), dict):
+            return plan_result["plan"], [p for p in ranked_places[:5] if isinstance(p, dict)]
+
+        return None, [p for p in ranked_places[:5] if isinstance(p, dict)]
+
+    @staticmethod
+    def _deep_find(obj: Any, key: str) -> Any:
+        """Best-effort recursive extraction of a key from an arbitrary nested structure."""
+        if isinstance(obj, dict):
+            if key in obj:
+                return obj.get(key)
+            for v in obj.values():
+                found = PlanAndExecuteAgent._deep_find(v, key)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for v in obj:
+                found = PlanAndExecuteAgent._deep_find(v, key)
+                if found is not None:
+                    return found
+        return None
+
+    async def get_last_checkpoint(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the latest LangGraph checkpoint for a given thread/session and extract partial outputs.
+
+        Used to return a partial plan when the global Supervisor timeout triggers.
+        """
+        if not session_id:
+            return None
+
+        await self._ensure_graph_initialized()
+        if self.checkpoint_pool is None:
+            return None
+
+        # LangGraph serializes checkpoints via msgpack into langgraph_checkpoints.checkpoint (BYTEA).
+        try:
+            import msgpack  # type: ignore
+        except Exception:
+            self.logger.warning("msgpack-not-available-cannot-decode-checkpoint")
+            return None
+
+        try:
+            async with self.checkpoint_pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT checkpoint, metadata, checkpoint_id, created_at
+                        FROM langgraph_checkpoints
+                        WHERE thread_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (str(session_id),),
+                    )
+                    row = await cur.fetchone()
+        except Exception as exc:
+            self.logger.warning("checkpoint-fetch-failed", session_id=session_id, error=str(exc))
+            return None
+
+        if not row:
+            return None
+
+        checkpoint_bytes = row[0]
+        if isinstance(checkpoint_bytes, memoryview):
+            checkpoint_bytes = checkpoint_bytes.tobytes()
+        elif isinstance(checkpoint_bytes, bytearray):
+            checkpoint_bytes = bytes(checkpoint_bytes)
+        checkpoint_id = row[2] if len(row) > 2 else None
+        if not checkpoint_bytes:
+            return None
+
+        try:
+            decoded = msgpack.unpackb(checkpoint_bytes, raw=False)
+        except Exception as exc:
+            self.logger.warning("checkpoint-decode-failed", session_id=session_id, error=str(exc))
+            return None
+
+        plan_json = self._deep_find(decoded, "plan_json") or self._deep_find(decoded, "plan")
+        places = self._deep_find(decoded, "places")
+        plan_params = self._deep_find(decoded, "plan_params")
+        past_steps = self._deep_find(decoded, "past_steps")
+        response_text = self._deep_find(decoded, "response_text")
+
+        has_plan = isinstance(plan_json, dict) and bool(plan_json)
+        has_places = isinstance(places, list) and len(places) > 0
+        has_text = isinstance(response_text, str) and bool(response_text.strip())
+        if not (has_plan or has_places or has_text):
+            return None
+
+        return {
+            "checkpoint_id": checkpoint_id,
+            "plan": plan_json if isinstance(plan_json, dict) else None,
+            "places": places if isinstance(places, list) else [],
+            "plan_params": plan_params if isinstance(plan_params, dict) else {},
+            "past_steps": past_steps if isinstance(past_steps, list) else [],
+            "response_text": response_text if isinstance(response_text, str) else "",
+        }
+
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph state machine."""
         workflow = StateGraph(PlanExecuteState)
@@ -428,13 +843,19 @@ class PlanAndExecuteAgent:
         
         self.logger.debug("plan-node-params", params=plan_params, has_params=bool(plan_params))
         
-        # Check required fields
-        required_fields = ["num_people", "cities", "budget_per_person", "vibes"]
-        missing = []
+        # Check required fields (vibes is optional when user explicitly has no preference)
+        required_fields = ["num_people", "cities", "budget_per_person"]
+        missing: list[str] = []
         for field in required_fields:
             value = plan_params.get(field)
-            if value is None or (isinstance(value, list) and len(value) == 0):
+            if value is None or (isinstance(value, list) and len(value) == 0) or value == "":
                 missing.append(field)
+
+        # Vibes: required only if not explicitly "any"
+        if plan_params.get("vibes_any") is not True:
+            vibes_value = plan_params.get("vibes")
+            if vibes_value is None or (isinstance(vibes_value, list) and len(vibes_value) == 0) or vibes_value == "":
+                missing.append("vibes")
         
         if missing:
             self.logger.info("plan-stopped-missing-info", missing=missing)
@@ -581,13 +1002,143 @@ Execute the step now using the appropriate tools."""
             agent=agent,
             tools=self.all_tools,
             verbose=False,
-            max_iterations=5,
+            max_iterations=3,
             handle_parsing_errors=True,
         )
         
         try:
             exec_result = await agent_executor.ainvoke({"input": exec_prompt})
             response_text = exec_result.get("output", "Step completed")
+
+            # Guard rails: if any critical tool returned a structured error, stop early.
+            for action, observation in exec_result.get("intermediate_steps", []) or []:
+                tool_name = getattr(action, "tool", None) or str(action)
+                if not isinstance(observation, dict):
+                    continue
+                if observation.get("error") is True:
+                    # Deterministic error: do not continue with degraded state.
+                    self.logger.warning("tool-error-detected", tool=tool_name, error=observation.get("message"))
+                    language = state.get("language", "es")
+                    msg = (
+                        "Tuve un problema procesando los resultados para armar el plan. "
+                        "¿Quieres que lo intente de nuevo enfocándonos solo en restaurantes, o prefieres un plan de 2 paradas (paseo + cena)?"
+                        if str(language).startswith("es")
+                        else "I hit an issue processing results to build the plan. Do you want me to retry focusing only on restaurants, or prefer a 2-stop plan (walk + dinner)?"
+                    )
+                    return {
+                        "past_steps": [
+                            (
+                                current_step,
+                                {"response": response_text, "tool_calls": len(exec_result.get("intermediate_steps", []))},
+                            )
+                        ],
+                        "current_step": None,
+                        "messages": [AIMessage(content=msg)],
+                        "reasoning_steps": state.get("reasoning_steps", 0) + 1,
+                        "response_text": msg,
+                    }
+
+                # If a tool returned {success: False, error: ...} treat it as a failure as well.
+                if observation.get("success") is False and observation.get("error"):
+                    self.logger.warning("tool-unsuccessful-detected", tool=tool_name, error=observation.get("error"))
+                    language = state.get("language", "es")
+                    msg = (
+                        "Tuve un problema con una herramienta necesaria para armar el plan. "
+                        "Puedo reintentar con una búsqueda más amplia o armar un plan más simple con menos paradas. "
+                        "¿Qué prefieres?"
+                        if str(language).startswith("es")
+                        else "A required tool failed. I can retry with a broader search or generate a simpler plan with fewer stops. Which do you prefer?"
+                    )
+                    return {
+                        "past_steps": [
+                            (
+                                current_step,
+                                {"response": response_text, "tool_calls": len(exec_result.get("intermediate_steps", []))},
+                            )
+                        ],
+                        "current_step": None,
+                        "messages": [AIMessage(content=msg)],
+                        "reasoning_steps": state.get("reasoning_steps", 0) + 1,
+                        "response_text": msg,
+                    }
+
+            # Deterministic coverage gating: inspect tool observations (not LLM text)
+            # If geocode_city_tool indicates outside coverage, stop and let LLM craft a friendly message.
+            coverage_observation: dict | None = None
+            for action, observation in exec_result.get("intermediate_steps", []) or []:
+                tool_name = getattr(action, "tool", None) or str(action)
+                if "geocode_city_tool" not in str(tool_name):
+                    continue
+                if not isinstance(observation, str):
+                    continue
+                try:
+                    parsed = json.loads(observation)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict) and parsed.get("ok") is True and parsed.get("coverage_enabled") is True:
+                    coverage_observation = parsed
+                    break
+
+            if coverage_observation and coverage_observation.get("is_within_coverage") is False:
+                from src.config.settings import get_settings
+
+                settings = get_settings()
+                allowed = settings.coverage_countries_list
+                language = state.get("language", "es")
+                user_query = state.get("input", "")
+                city_query = coverage_observation.get("query", "")
+                country_name = coverage_observation.get("country_name", "")
+                country_code = coverage_observation.get("country_code", "")
+
+                policy_note = settings.coverage_policy_note
+                policy_prompt = f"""You are Auphere, a helpful travel planning assistant.
+
+The user asked for a plan in a location OUTSIDE our current MVP coverage.
+
+Policy (non user-facing): {policy_note}
+Allowed countries (ISO): {allowed}
+
+Detected location:
+- query: {city_query}
+- country: {country_name} ({country_code})
+
+User query: {user_query}
+User language: {language}
+
+Write a short, friendly response in the user's language.
+Constraints:
+- Do NOT mention internal markers, tools, or policies verbatim.
+- Explain we currently have limited coverage during MVP.
+- Ask the user to choose a city within the supported coverage to continue.
+- Keep it concise (1-3 sentences)."""
+
+                try:
+                    msg = await self.synthesizer_llm.ainvoke([SystemMessage(content=policy_prompt)])
+                    coverage_response = clean_response_text(msg.content)
+                except Exception as exc:
+                    self.logger.warning("coverage-response-generation-failed", error=str(exc))
+                    coverage_response = (
+                        "Ahora mismo tenemos cobertura limitada durante el MVP. "
+                        "¿Quieres que armemos el plan en una ciudad dentro de nuestra cobertura para continuar?"
+                        if str(language).startswith("es")
+                        else "We currently have limited coverage during our MVP. Could you choose a city within our supported coverage to continue?"
+                    )
+
+                return {
+                    "past_steps": [
+                        (
+                            current_step,
+                            {
+                                "response": response_text,
+                                "tool_calls": len(exec_result.get("intermediate_steps", [])),
+                            },
+                        )
+                    ],
+                    "current_step": None,
+                    "messages": [AIMessage(content=coverage_response)],
+                    "reasoning_steps": state.get("reasoning_steps", 0) + 1,
+                    "response_text": coverage_response,
+                }
             
             # Check if final step
             if "generate_plan_json_tool" in current_step.lower():
@@ -622,21 +1173,44 @@ Execute the step now using the appropriate tools."""
                         seen_ids.add(place_id)
                         unique_places.append(place)
                 
-                # Synthesize final response
-                synth_prompt = SYNTHESIZER_PROMPT.format(
-                    query=state["input"],
-                    language=state.get("language", "es"),
-                    all_results=self._format_past_steps(state.get("past_steps", [])) + f"\n\nFinal: {response_text}",
-                    context=json.dumps(context, indent=2, default=str),
-                )
-                
-                synth_response = await self.synthesizer_llm.ainvoke([SystemMessage(content=synth_prompt)])
-                final_response = clean_response_text(synth_response.content)
+                # Synthesize final response (skip if close to deadline to avoid global timeout)
+                deadline_ts = float(state.get("deadline_ts") or 0.0)
+                should_skip_synthesis = deadline_ts > 0 and perf_counter() > (deadline_ts - 10.0)
+
+                if should_skip_synthesis:
+                    self.logger.warning(
+                        "skipping-final-synthesis-near-deadline",
+                        session_id=state.get("session_id"),
+                    )
+                    final_response = (
+                        "Listo: ya armé el plan y lo dejé reflejado en la tarjeta del itinerario."
+                        if str(state.get("language", "es")).startswith("es")
+                        else "Done: I generated the plan and it’s available in the itinerary card."
+                    )
+                else:
+                    synth_prompt = SYNTHESIZER_PROMPT.format(
+                        query=state["input"],
+                        language=state.get("language", "es"),
+                        all_results=self._format_past_steps(state.get("past_steps", [])) + f"\n\nFinal: {response_text}",
+                        context=json.dumps(context, indent=2, default=str),
+                    )
+
+                    synth_response = await self.synthesizer_llm.ainvoke([SystemMessage(content=synth_prompt)])
+                    final_response = clean_response_text(synth_response.content)
                 
                 # Save places
                 if unique_places:
                     try:
-                        unique_places = await save_places_to_db(unique_places, self.settings)
+                        fallback_city = None
+                        pp = state.get("plan_params") or {}
+                        if isinstance(pp, dict):
+                            fallback_city = pp.get("primary_city") or (pp.get("cities") or [None])[0]
+
+                        unique_places = await save_places_to_db(
+                            unique_places,
+                            self.settings,
+                            fallback_city=str(fallback_city) if fallback_city else None,
+                        )
                         self.logger.info("places-saved", count=len(unique_places))
                     except Exception as exc:
                         self.logger.error("failed-to-save-places", error=str(exc))
@@ -652,6 +1226,8 @@ Execute the step now using the appropriate tools."""
                     "response_text": final_response,
                 }
             
+            # Note: coverage gating handled above by inspecting tool observations.
+            
             # Not final step - continue
             plan = state.get("plan", [])
             current_idx = next((i for i, step in enumerate(plan) if step == current_step), -1)
@@ -666,6 +1242,40 @@ Execute the step now using the appropriate tools."""
             }
             
         except Exception as e:
+            # If the final tool call failed (e.g., missing required args), fall back deterministically.
+            if isinstance(current_step, str) and "generate_plan_json_tool" in current_step.lower():
+                self.logger.error("execution-failed-final-step", error=str(e))
+                plan_json, selected_places = await self._fallback_build_plan_json(state)
+                if plan_json:
+                    final_response = (
+                        "Listo: generé el itinerario y lo dejé reflejado en la tarjeta del plan."
+                        if str(state.get("language", "es")).startswith("es")
+                        else "Done: I generated the itinerary and it’s available in the plan card."
+                    )
+                    return {
+                        "past_steps": [(current_step, {"response": f"Fallback after error: {e}", "tool_calls": 0})],
+                        "current_step": None,
+                        "plan_json": plan_json,
+                        "places": selected_places[:5],
+                        "messages": [AIMessage(content=final_response)],
+                        "reasoning_steps": state.get("reasoning_steps", 0) + 1,
+                        "response_text": final_response,
+                    }
+
+                msg = (
+                    "No pude generar el plan automáticamente porque los datos de los lugares estaban incompletos. "
+                    "¿Quieres que lo armemos solo con restaurantes (más fácil) o que ampliemos la búsqueda a otra zona de Zaragoza?"
+                    if str(state.get("language", "es")).startswith("es")
+                    else "I couldn’t generate the plan automatically because the place data was incomplete. Do you want a restaurants-only plan (easier) or expand the search area?"
+                )
+                return {
+                    "past_steps": [(current_step, {"response": f"Error: {e}", "tool_calls": 0})],
+                    "current_step": None,
+                    "messages": [AIMessage(content=msg)],
+                    "reasoning_steps": state.get("reasoning_steps", 0) + 1,
+                    "response_text": msg,
+                }
+
             self.logger.error("execution-failed", error=str(e))
             # With reducers, just return NEW items
             return {
@@ -802,11 +1412,14 @@ Execute the step now using the appropriate tools."""
                 history_summary.append(f"{role}: {content}")
             serializable_context["conversation_history_text"] = "\n".join(history_summary)
 
+        deadline_ts = perf_counter() + max(5.0, float(self.settings.agent_max_execution_time) - 5.0)
+
         # ✅ Initial state with plan_params as first-level field
         initial_state = {
             "input": query,
             "language": language,
             "session_id": session_id,
+            "deadline_ts": deadline_ts,
             "plan_params": plan_params,  # ✅ First-level field with reducer
             "context": serializable_context,
             "plan": [],

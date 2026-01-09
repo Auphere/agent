@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # Local: console logging | Production: PostHog Cloud
     posthog_enabled: bool = False
     posthog_api_key: Optional[str] = None  # Required for production
-    posthog_host: str = "https://app.posthog.com"  # PostHog Cloud
+    posthog_host: str = "https://eu.i.posthog.com"  # PostHog Cloud EU
     
     # Cache TTLs (in seconds)
     cache_ttl_intent: int = 3600  # 1 hour
@@ -105,6 +105,18 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3                   # Max retries for LLM calls
     tool_max_retries: int = 2                  # Max retries for tool calls
 
+    # Geographic Coverage (MVP)
+    # Comma-separated list of country codes (ISO 3166-1 alpha-2) allowed during MVP
+    # Set to empty string to disable coverage restriction
+    coverage_enabled: bool = True
+    coverage_countries: str = "ES"  # Spain only for MVP. Add "PT,FR,IT" to expand
+    # Non user-facing guidance for the agent when a query is outside coverage.
+    # The agent (LLM) should generate the final friendly user response in the user's language.
+    coverage_policy_note: str = (
+        "During MVP, if the user requests a plan outside the configured coverage countries, "
+        "politely explain the limitation and ask them to choose a city within coverage."
+    )
+
     # API configuration
     allowed_origins: str = ""  # Comma-separated list of allowed origins
 
@@ -119,6 +131,13 @@ class Settings(BaseSettings):
     def supported_languages_list(self) -> List[str]:
         """Return parsed list of supported languages."""
         return [lang.strip().lower() for lang in self.supported_languages.split(",") if lang.strip()]
+
+    @property
+    def coverage_countries_list(self) -> List[str]:
+        """Return parsed list of allowed country codes (uppercase)."""
+        if not self.coverage_countries:
+            return []
+        return [code.strip().upper() for code in self.coverage_countries.split(",") if code.strip()]
 
     @property
     def allowed_origins_list(self) -> List[str]:

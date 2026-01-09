@@ -17,9 +17,21 @@ from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from src.config.settings import Settings, get_settings
+from src.utils.cache_manager import get_cache_manager
 from src.utils.logger import get_logger
 
 logger = get_logger("routing_tool")
+
+
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Reuse a single AsyncClient to benefit from connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=20.0)
+    return _http_client
 
 
 class RouteSegment(BaseModel):
@@ -56,16 +68,29 @@ async def _calculate_distance_matrix(
         "key": api_key,
         "language": "es",
     }
-    
-    async with httpx.AsyncClient(timeout=20.0) as client:
+
+    # Cache the distance matrix by coordinates/mode (but never by api_key).
+    cache = await get_cache_manager()
+
+    async def _fetch() -> Dict[str, Any]:
+        client = _get_http_client()
         response = await client.get(base_url, params=params)
         response.raise_for_status()
         data = response.json()
-        
         if data.get("status") != "OK":
             raise Exception(f"Distance Matrix API error: {data.get('status')}")
-        
         return data
+
+    # 6h TTL: distances are stable enough and this cuts repeated calls inside flows.
+    return await cache.get_or_set(
+        "google_distance_matrix",
+        _fetch,
+        21600,
+        origins,
+        destinations,
+        mode,
+        "es",
+    )
 
 
 def _optimize_route_order(

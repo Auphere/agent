@@ -185,9 +185,17 @@ class CacheManager:
                 if hasattr(fetch_fn, "__call__"):
                     import inspect
                     if inspect.iscoroutinefunction(fetch_fn):
-                        value = await fetch_fn(*args, **kwargs)
+                        try:
+                            # Preferred: allow fetch_fn to accept args (some call-sites may rely on this)
+                            value = await fetch_fn(*args, **kwargs)
+                        except TypeError:
+                            # Common pattern: fetch_fn is a closure with 0 params; args are only for cache key.
+                            value = await fetch_fn()
                     else:
-                        value = fetch_fn(*args, **kwargs)
+                        try:
+                            value = fetch_fn(*args, **kwargs)
+                        except TypeError:
+                            value = fetch_fn()
                 else:
                     value = await fetch_fn(*args, **kwargs)
 

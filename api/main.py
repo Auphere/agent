@@ -21,6 +21,7 @@ from src.database import close_db, init_db
 from src.utils.cache_manager import get_cache_manager
 from src.utils.logger import get_logger
 from src.utils.tracing import configure_langsmith
+from src.utils.analytics import shutdown_analytics
 from src.agents.supervisor_singleton import get_supervisor_agent
 from src.vector.qdrant_store import get_qdrant_store
 
@@ -98,6 +99,10 @@ async def lifespan(app: FastAPI):
 
     except Exception as exc:
         logger.error(f"❌ Shutdown error: {exc}")
+
+    # Flush PostHog events before shutdown
+    shutdown_analytics()
+    logger.info("✅ Analytics flushed")
 
     logger.info("👋 Auphere Agent stopped")
 

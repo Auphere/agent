@@ -195,6 +195,43 @@ class TestSupervisorFallback:
                 # Should have used fallback
                 assert "fallback" in result.get("routed_to", "").lower()
 
+    @pytest.mark.asyncio
+    async def test_supervisor_returns_partial_plan_on_plan_timeout(self):
+        """When PLAN times out, Supervisor should return partial plan from checkpoint instead of generic fallback."""
+        from src.agents.supervisor_agent import SupervisorAgent
+        from src.classifiers.models import IntentType
+
+        # Keep timeout extremely small for the test
+        settings = Settings(agent_max_execution_time=0.05)
+        supervisor = SupervisorAgent(settings=settings)
+
+        async def slow_plan_run(*args, **kwargs):
+            await asyncio.sleep(1)
+            return {"response_text": "should not reach", "places": []}
+
+        partial_plan = {"planId": "p1", "stops": [], "summary": {}}
+        checkpoint_payload = {
+            "plan": partial_plan,
+            "places": [{"name": "Test Place", "place_id": "x"}],
+            "plan_params": {"primary_city": "Zaragoza"},
+        }
+
+        fake_plan_agent = MagicMock()
+        fake_plan_agent.run = AsyncMock(side_effect=slow_plan_run)
+        fake_plan_agent.get_last_checkpoint = AsyncMock(return_value=checkpoint_payload)
+
+        with patch.object(supervisor, "_get_plan_and_execute_agent", return_value=fake_plan_agent):
+            result = await supervisor.run(
+                query="test plan",
+                intent=IntentType.PLAN,
+                language="es",
+                context={"session_id": "session-1"},
+            )
+
+        assert result.get("agent_type") == "plan_partial"
+        assert result.get("plan") == partial_plan
+        assert result.get("routed_to") == "plan_partial_after_timeout"
+
 
 class TestRetryBehavior:
     """Test retry behavior for transient failures."""

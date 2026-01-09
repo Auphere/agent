@@ -37,6 +37,49 @@ from src.utils.metrics import get_metrics_collector, timed
 from src.utils.language_handler import get_language_handler, LanguageHandler
 from src.utils.response_validator import get_response_validator, ResponseValidator
 
+def _is_outside_coverage_tool_result(tool_result: Any) -> bool:
+    try:
+        return isinstance(tool_result, dict) and tool_result.get("error") == "OUTSIDE_COVERAGE"
+    except Exception:
+        return False
+
+
+async def _render_outside_coverage_message(
+    *,
+    llm: ChatOpenAI,
+    settings: Settings,
+    query: str,
+    language: str,
+    tool_result: Dict[str, Any],
+) -> str:
+    """Ask the LLM to craft a friendly message about MVP coverage limitations."""
+    coverage = tool_result.get("coverage") if isinstance(tool_result, dict) else {}
+    country_name = (coverage or {}).get("country_name", "")
+    country_code = (coverage or {}).get("country_code", "")
+    allowed = (coverage or {}).get("allowed_countries", settings.coverage_countries_list)
+    policy_note = getattr(settings, "coverage_policy_note", "")
+
+    prompt = f"""You are Auphere, a helpful assistant.
+
+The user requested something outside our current MVP coverage.
+
+Policy (non user-facing): {policy_note}
+Allowed countries (ISO): {allowed}
+Detected country: {country_name} ({country_code})
+
+User language: {language}
+User query: {query}
+
+Write a short, friendly response in the user's language.
+Constraints:
+- Do NOT mention internal tools, errors, logs, or policy text verbatim.
+- Explain we currently have limited coverage during MVP.
+- Ask the user to choose a city within the supported coverage to continue.
+- Keep it concise (1-3 sentences)."""
+
+    msg = await llm.ainvoke([SystemMessage(content=prompt)])
+    return clean_response_text(getattr(msg, "content", str(msg)))
+
 
 # ============================================================================
 # Reference resolution helpers (e.g., "el segundo", "the first one")
@@ -550,6 +593,32 @@ class BaseSpecializedAgent(ABC):
                                 tool.ainvoke(tool_args),
                                 timeout=self.settings.tool_timeout
                             )
+
+                            # Global coverage enforcement handling:
+                            # If the tool signals OUTSIDE_COVERAGE, stop and let the LLM craft the final user message.
+                            if _is_outside_coverage_tool_result(tool_result):
+                                response_text = await _render_outside_coverage_message(
+                                    llm=self.llm,
+                                    settings=self.settings,
+                                    query=query,
+                                    language=language,
+                                    tool_result=tool_result,
+                                )
+                                total_duration = perf_counter() - start_time
+                                agent_metrics.tool_calls = tool_call_count
+                                agent_metrics.places_found = 0
+                                metrics_collector.end_agent_execution(agent_metrics, success=True)
+                                return {
+                                    "response_text": response_text,
+                                    "places": [],
+                                    "tool_calls": tool_call_count,
+                                    "reasoning_steps": len(messages),
+                                    "agent_type": self.agent_type,
+                                    "model_used": self.llm.model_name,
+                                    "duration_ms": int(total_duration * 1000),
+                                    "blocked_by_coverage": True,
+                                    "coverage": tool_result.get("coverage"),
+                                }
                             
                             tool_duration = perf_counter() - tool_start
                             self.logger.debug(

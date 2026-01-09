@@ -72,27 +72,49 @@ async def generate_plan_json_tool(
     This tool creates a complete plan object that the frontend can display
     with a timeline, map, and all necessary details for each stop.
 
+    CRITICAL: The 'stops' parameter is REQUIRED and must be a non-empty list.
+    Each stop must be built from the places found in previous steps.
+
     Args:
         title: Plan title (e.g., "Romantic Evening in Madrid")
-        description: Brief description
+        description: Brief description of the plan
         category: Plan category (romantic, friends, family, etc.)
         vibes: List of vibes (romantic, energetic, chill, etc.)
-        date: Execution date (YYYY-MM-DD or "TBD")
-        start_time: Start time (HH:MM or "TBD")
-        city: City name
-        group_size: Number of people
-        stops: List of stop objects with all required fields
+        date: Execution date (YYYY-MM-DD or "TBD" if not specified)
+        start_time: Start time (HH:MM or "TBD" if not specified)
+        city: City name where the plan takes place
+        group_size: Number of people in the group
+        stops: REQUIRED - List of stop objects. Each stop MUST include:
+            - stopNumber: int (1, 2, 3...)
+            - localId: str (place ID from search results)
+            - name: str (place name)
+            - category: str (restaurant, bar, club, cafe, activity)
+            - timing: dict with recommendedStart, suggestedDurationMinutes
+            - location: dict with address, lat, lng
+            - details: dict with vibes, averageSpendPerPerson
+            - selectionReasons: list of strings explaining why selected
+            - actions: dict with googleMapsUrl
+            Example: [{"stopNumber": 1, "localId": "abc123", "name": "Cafe Example", ...}]
         total_duration_hours: Total duration in hours
-        total_distance_km: Total distance in km
-        budget_per_person: Estimated budget per person
-        user_max_budget_per_person: User's maximum budget per person (NEW - for validation)
-        final_recommendations: Final tips and recommendations
+        total_distance_km: Total distance in km (optional, will be calculated)
+        budget_per_person: Estimated budget per person (optional)
+        user_max_budget_per_person: User's max budget for validation (optional)
+        final_recommendations: Final tips and recommendations (optional)
 
     Returns:
-        Complete structured plan JSON with validation
+        Complete structured plan JSON with validation, or error if stops is empty/missing
     """
 
     try:
+        # ✅ CRITICAL: Validate stops is not empty
+        if not stops or len(stops) == 0:
+            logger.error("generate_plan_json_tool called without stops")
+            return {
+                "success": False,
+                "error": "No stops provided",
+                "message": "Cannot generate a plan without stops. Please search for places first and build the stops list from the search results.",
+            }
+
         # ✅ NEW: Validate city - don't accept TBD
         if city == "TBD" or not city:
             # Try to extract city from stops addresses

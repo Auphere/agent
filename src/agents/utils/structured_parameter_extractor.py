@@ -36,6 +36,13 @@ class PlanParameters(BaseModel):
         None,
         description="Cities mentioned. Extract city names."
     )
+    primary_city: Optional[str] = Field(
+        None,
+        description=(
+            "The main city the user wants the plan for in the CURRENT request. "
+            "If multiple cities are mentioned across the conversation, pick the one that the user is asking to plan in now."
+        ),
+    )
     budget_per_person: Optional[float] = Field(
         None,
         description="Budget per person in euros. If 'presupuesto total' is mentioned, divide by num_people. Extract from: '50 euros', '50€', 'presupuesto de 50', '30 euros total' (divide by num_people)."
@@ -43,6 +50,13 @@ class PlanParameters(BaseModel):
     vibes: Optional[List[str]] = Field(
         None,
         description="Desired atmosphere/vibes. Options: romantic, energetic, chill, elegant, adventurous, cultural, festive, casual, fun, lively"
+    )
+    vibes_any: Optional[bool] = Field(
+        None,
+        description=(
+            "True when the user explicitly states they have no preference about the vibe/atmosphere, "
+            "e.g. 'cualquier ambiente está bien', 'me da igual el ambiente', 'lo que sea'."
+        ),
     )
     date: Optional[str] = Field(
         None,
@@ -82,6 +96,11 @@ class StructuredParameterExtractor:
             model="gpt-4o",
             temperature=0,
             api_key=self.settings.openai_api_key,
+            timeout=(
+                self.settings.llm_connection_timeout,
+                self.settings.llm_read_timeout_standard,
+            ),
+            max_retries=self.settings.llm_max_retries,
         )
         
         # Create structured output extractor
@@ -139,6 +158,8 @@ Extract these parameters:
 
 2. **cities**: Which cities are mentioned
    - Extract city names: "Madrid", "Barcelona", "Zaragoza", etc.
+   - IMPORTANT: Also set **primary_city** to the main city for the CURRENT request
+     (e.g., 'crear un plan en Zaragoza' → primary_city='Zaragoza'), even if other cities appear in history.
 
 3. **budget_per_person**: Budget per person in euros
    - Look for: "50 euros", "50€", "presupuesto de 50", "50 por persona"
@@ -150,6 +171,9 @@ Extract these parameters:
    - Options: romantic, energetic, chill, elegant, adventurous, cultural, festive, casual, fun, lively
    - Look for: "romántico", "animado", "tranquilo", "elegante", "aventura", "cultural", "fiesta", "divertido" (→ fun/energetic), "conversar" (→ chill/casual)
    - Translate Spanish vibes to English options
+   - IMPORTANT: If the user explicitly says they have NO preference (e.g., "cualquier ambiente está bien", "me da igual", "lo que sea"), set:
+     - vibes_any=true
+     - vibes=null (or an empty list)
 
 5. **date**: Date if mentioned
    - Extract: "2024-12-25", "este sábado", "mañana", "el viernes"
@@ -240,14 +264,21 @@ IMPORTANT:
         Returns:
             List of missing required field names
         """
+        # "vibes" is required ONLY if the user did not explicitly say they have no preference.
         required_fields = ["num_people", "cities", "budget_per_person", "vibes"]
         
         missing = []
         for field in required_fields:
             value = params.get(field)
             # Check if value is None, empty list, or empty string
-            if value is None or (isinstance(value, list) and len(value) == 0) or value == "":
-                missing.append(field)
+            if field == "vibes":
+                if params.get("vibes_any") is True:
+                    continue
+                if value is None or (isinstance(value, list) and len(value) == 0) or value == "":
+                    missing.append(field)
+            else:
+                if value is None or (isinstance(value, list) and len(value) == 0) or value == "":
+                    missing.append(field)
         
         return missing
     

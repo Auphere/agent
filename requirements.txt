@@ -43,6 +43,7 @@ structlog==24.4.0
 # Utils
 tenacity==9.0.0
 uuid==1.30
+msgpack==1.0.8
 
 # Vector DB
 qdrant-client==1.13.2
