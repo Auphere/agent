@@ -129,7 +129,7 @@ class PlanExecuteState(TypedDict, total=False):
 
 PLANNER_PROMPT = """You are an expert planning agent for finding and recommending places.
 
-Your task: Create a step-by-step plan to accomplish the user's request.
+Your task: Create a CONCISE step-by-step plan to accomplish the user's request.
 
 ## ACCUMULATED PARAMETERS (from full conversation):
 
@@ -161,20 +161,22 @@ Return ONLY valid JSON:
     "Step 1: Use geocode_city_tool to get coordinates for [city]",
     "Step 2: Use places_search_tool to search for [type] in [city]",
     "Step 3: Use rank_by_score_tool to rank results for [criteria] and keep only top K",
-    "Step 4: Use places_clusters_tool to cluster top candidates by zones (optional)",
-    "Step 5: Use calculate_route_tool to optimize order and travel times (optional)",
-    "Step 6: Use generate_plan_json_tool to create itinerary"
+    "Step 4: Use generate_plan_json_tool to create itinerary"
   ],
   "reasoning": "Brief explanation"
 }}
 
-## RULES:
+## CRITICAL RULES FOR PERFORMANCE:
 
-- Create 3-5 specific, actionable steps
+- Create MAXIMUM 4 steps (STRICT LIMIT - performance requirement)
+- Skip optional tools (places_clusters_tool, calculate_route_tool) - they add latency
 - Each step should mention which tool to use
 - Always start with geocode_city_tool if a city is mentioned
 - Always end with generate_plan_json_tool
+- Combine related operations into single steps where possible
 - Be specific about what to search for
+
+PERFORMANCE TARGET: 4 steps maximum to complete within 90 seconds.
 """
 
 EXECUTOR_PROMPT = """You are an expert executor agent that carries out specific steps of a plan.
@@ -920,6 +922,25 @@ class PlanAndExecuteAgent:
         if not current_step:
             return {"current_step": None}
 
+        # OPTIMIZATION: Check deadline to avoid starting expensive operations near timeout
+        deadline_ts = state.get("deadline_ts")
+        if deadline_ts:
+            from time import time
+            time_remaining = deadline_ts - time()
+
+            # If less than 30 seconds remaining, skip execution to avoid timeout mid-step
+            if time_remaining < 30.0:
+                self.logger.warning(
+                    "execute-node-approaching-deadline",
+                    time_remaining=time_remaining,
+                    step=current_step,
+                )
+                # Return early with partial results
+                return {
+                    "current_step": None,
+                    "response_text": "Approaching timeout, returning partial results.",
+                }
+
         self.logger.info("executing-step", step=current_step)
         
         # Handle STOP condition
@@ -1026,11 +1047,13 @@ Execute the step now using the appropriate tools."""
             prompt=prompt_template,
         )
         
+        # OPTIMIZATION: Reduce max_iterations from 3 to 2 for faster execution
+        # This still allows one retry but completes ~33% faster
         agent_executor = AgentExecutor(
             agent=agent,
             tools=self.all_tools,
             verbose=False,
-            max_iterations=3,
+            max_iterations=2,  # Reduced from 3 for performance
             handle_parsing_errors=True,
         )
         
@@ -1392,6 +1415,28 @@ Constraints:
 
         if isinstance(current_step, str) and current_step.startswith("STOP:"):
             return "end"
+
+        # OPTIMIZATION: Early termination if we already have a complete plan
+        # This avoids executing remaining steps unnecessarily
+        plan = state.get("plan_json") or state.get("plan")
+        if plan and isinstance(plan, dict) and plan.get("stops"):
+            self.logger.info(
+                "early-termination-plan-complete",
+                stops_count=len(plan.get("stops", [])),
+            )
+            return "end"
+
+        # OPTIMIZATION: Check deadline - if less than 20s remaining, stop now
+        deadline_ts = state.get("deadline_ts")
+        if deadline_ts:
+            from time import time
+            time_remaining = deadline_ts - time()
+            if time_remaining < 20.0:
+                self.logger.warning(
+                    "early-termination-approaching-deadline",
+                    time_remaining=time_remaining,
+                )
+                return "end"
 
         return "continue"
 

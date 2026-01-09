@@ -508,6 +508,10 @@ class BaseSpecializedAgent(ABC):
                                 "agent_type": self.agent_type,
                                 "model_used": self.llm.model_name,
                                 "duration_ms": int(total_duration * 1000),
+                                "metadata": {
+                                    "input_tokens": 0,  # Fast-path, no LLM call
+                                    "output_tokens": 0,
+                                },
                             }
                     except Exception as exc:
                         # If anything goes wrong, fall back to normal LLM flow.
@@ -567,7 +571,20 @@ class BaseSpecializedAgent(ABC):
             response = await llm_for_call.ainvoke(messages)
             llm_duration = perf_counter() - llm_start
             self.logger.debug(f"llm-call-completed", duration_ms=int(llm_duration * 1000))
-            
+
+            # PHASE 2.6: Track token usage for cost monitoring
+            total_input_tokens = 0
+            total_output_tokens = 0
+
+            # Extract tokens from response metadata
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                total_input_tokens += response.usage_metadata.get('input_tokens', 0)
+                total_output_tokens += response.usage_metadata.get('output_tokens', 0)
+            elif hasattr(response, 'response_metadata') and response.response_metadata:
+                usage = response.response_metadata.get('token_usage', {})
+                total_input_tokens += usage.get('prompt_tokens', 0)
+                total_output_tokens += usage.get('completion_tokens', 0)
+
             messages.append(response)
             
             # Process tool calls if any
@@ -618,6 +635,10 @@ class BaseSpecializedAgent(ABC):
                                     "duration_ms": int(total_duration * 1000),
                                     "blocked_by_coverage": True,
                                     "coverage": tool_result.get("coverage"),
+                                    "metadata": {
+                                        "input_tokens": total_input_tokens,
+                                        "output_tokens": total_output_tokens,
+                                    },
                                 }
                             
                             tool_duration = perf_counter() - tool_start
@@ -654,6 +675,16 @@ class BaseSpecializedAgent(ABC):
                 
                 # Continue conversation with tool results
                 response = await self.llm_with_tools.ainvoke(messages)
+
+                # PHASE 2.6: Track token usage from tool loop LLM calls
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    total_input_tokens += response.usage_metadata.get('input_tokens', 0)
+                    total_output_tokens += response.usage_metadata.get('output_tokens', 0)
+                elif hasattr(response, 'response_metadata') and response.response_metadata:
+                    usage = response.response_metadata.get('token_usage', {})
+                    total_input_tokens += usage.get('prompt_tokens', 0)
+                    total_output_tokens += usage.get('completion_tokens', 0)
+
                 messages.append(response)
             
             # Extract final response
@@ -709,6 +740,10 @@ class BaseSpecializedAgent(ABC):
                 "agent_type": self.agent_type,
                 "model_used": self.llm.model_name,
                 "duration_ms": int(total_duration * 1000),
+                "metadata": {
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                },
             }
             
         except asyncio.TimeoutError as exc:
